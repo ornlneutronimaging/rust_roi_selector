@@ -1,0 +1,97 @@
+//! ROI Selector — view the integrated image of a stack (TIFF or NumPy), draw
+//! regions of interest (rectangle, circle, ellipse), and export a mask file
+//! where the selected pixels are 1 and everything else is 0.
+//!
+//! Designed to be launched either standalone or by an external tool (e.g. a
+//! marimo notebook) that passes the input image and the mask destination on
+//! the command line.
+
+use roi_selector::app::RoiApp;
+use roi_selector::loader;
+use std::path::PathBuf;
+
+const USAGE: &str = "\
+roi_selector — draw ROIs on an integrated image and export a 1/0 mask
+
+USAGE:
+  roi_selector [OPTIONS] [INPUT ...]
+
+ARGS:
+  INPUT   TIFF file(s), a folder of TIFF/.npy images, or a 2-D .npy image
+          (e.g. an integrated image exported by a notebook). Several frames
+          are combined (sum/mean/max) into the displayed image. When omitted,
+          the data can be opened from within the application.
+
+OPTIONS:
+  -o, --output <PATH>   Mask file written by the 'Save mask & quit' button
+                        (.tif/.tiff → 8-bit grayscale TIFF, .npy → uint8
+                        NumPy array; ROI pixels = 1, others = 0)
+  -h, --help            Show this help
+";
+
+fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
+    let mut inputs = Vec::new();
+    let mut output = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-o" | "--output" => {
+                let path = args.next().ok_or("--output requires a path")?;
+                output = Some(PathBuf::from(path));
+            }
+            s if s.starts_with('-') => return Err(format!("Unknown option: {s}")),
+            _ => inputs.push(PathBuf::from(a)),
+        }
+    }
+    Ok((inputs, output))
+}
+
+fn main() -> eframe::Result<()> {
+    let (inputs, output) = match parse_args() {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("Error: {e}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
+    // Expand folders to the supported image files they directly contain, so
+    // errors (missing folder, no images) surface on stderr before the GUI opens.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for input in inputs {
+        if input.is_dir() {
+            match loader::list_supported_in_dir(&input) {
+                Ok(found) => files.extend(found),
+                Err(e) => {
+                    eprintln!("Error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            files.push(input);
+        }
+    }
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 860.0])
+            .with_title("VENUS ROI Selector"),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "VENUS ROI Selector",
+        native_options,
+        Box::new(move |cc| {
+            let mut app = RoiApp::new(output);
+            if !files.is_empty() {
+                app.start_load(files, &cc.egui_ctx);
+            }
+            Ok(Box::new(app))
+        }),
+    )
+}

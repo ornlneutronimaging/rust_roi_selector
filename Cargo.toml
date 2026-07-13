@@ -1,0 +1,15 @@
+[package]
+name = "roi_selector"
+version = "0.1.0"
+edition = "2024"
+description = "Interactive ROI selection on an integrated image stack; exports a 1/0 mask"
+
+[dependencies]
+anyhow = "1.0"
+colorgrad = { version = "0.8", features = ["preset"] }
+eframe = "0.35"
+egui = "0.35"
+ndarray = "0.17"
+ndarray-npy = "0.10"
+rfd = "0.17"
+tiff = "0.11"
