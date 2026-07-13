@@ -23,15 +23,21 @@ ARGS:
           the data can be opened from within the application.
 
 OPTIONS:
-  -o, --output <PATH>   Mask file written by the 'Save mask & quit' button
-                        (.tif/.tiff → 8-bit grayscale TIFF, .npy → uint8
-                        NumPy array; ROI pixels = 1, others = 0)
-  -h, --help            Show this help
+  -o, --output <PATH>     Mask file written by the 'Save mask & quit' button
+                          (.tif/.tiff → 8-bit grayscale TIFF, .npy → uint8
+                          NumPy array; ROI pixels = 1, others = 0)
+  --called-from-python    The app is driven by another application (e.g. a
+                          marimo notebook): the save button becomes
+                          '⏎ Return to main application', which writes the
+                          mask to --output (required) and closes the window
+                          so the caller can resume.
+  -h, --help              Show this help
 ";
 
-fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
+fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>, bool), String> {
     let mut inputs = Vec::new();
     let mut output = None;
+    let mut called_from_python = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -43,15 +49,19 @@ fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
                 let path = args.next().ok_or("--output requires a path")?;
                 output = Some(PathBuf::from(path));
             }
+            "--called-from-python" | "--called_from_python" => called_from_python = true,
             s if s.starts_with('-') => return Err(format!("Unknown option: {s}")),
             _ => inputs.push(PathBuf::from(a)),
         }
     }
-    Ok((inputs, output))
+    if called_from_python && output.is_none() {
+        return Err("--called-from-python requires --output <PATH> (where the mask is returned)".to_owned());
+    }
+    Ok((inputs, output, called_from_python))
 }
 
 fn main() -> eframe::Result<()> {
-    let (inputs, output) = match parse_args() {
+    let (inputs, output, called_from_python) = match parse_args() {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("Error: {e}\n\n{USAGE}");
@@ -87,7 +97,7 @@ fn main() -> eframe::Result<()> {
         "VENUS ROI Selector",
         native_options,
         Box::new(move |cc| {
-            let mut app = RoiApp::new(output);
+            let mut app = RoiApp::new(output, called_from_python);
             if !files.is_empty() {
                 app.start_load(files, &cc.egui_ctx);
             }

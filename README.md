@@ -27,7 +27,7 @@ roi_selector /SNS/VENUS/IPTS-XXXX/.../Run_YYYY
 
 # Display a pre-integrated 2-D .npy image and write the mask where the
 # caller expects it — the workflow used by the marimo notebooks
-roi_selector integrated_sample.npy --output mask.tif
+roi_selector integrated_sample.npy --output mask.tif --called-from-python
 ```
 
 - **INPUT** — TIFF file(s) (multi-page supported), a folder of TIFF/`.npy`
@@ -36,6 +36,10 @@ roi_selector integrated_sample.npy --output mask.tif
 - **`-o, --output <PATH>`** — enables the **✅ Save mask & quit** button, which
   writes the mask to `PATH` and closes the app. `.tif`/`.tiff` → 8-bit
   grayscale TIFF; `.npy` → `uint8` NumPy array of shape `(height, width)`.
+- **`--called-from-python`** — the app is driven by another application that
+  is blocked waiting for the mask: the button reads **⏎ Return to main
+  application** instead, which writes the mask to `--output` (required with
+  this flag) and closes the window so the caller resumes.
 - Without `--output`, use **💾 Save mask as…** to pick the destination.
 
 ## Controls
@@ -67,9 +71,10 @@ with tempfile.TemporaryDirectory() as tmp:
     np.save(image_path, integrated_sample)
 
     subprocess.run(
-        ["roi_selector", str(image_path), "--output", str(mask_path)],
+        ["roi_selector", str(image_path),
+         "--output", str(mask_path), "--called-from-python"],
         check=True,
-    )  # blocks until the user clicks "Save mask & quit"
+    )  # blocks until the user clicks "⏎ Return to main application"
 
     mask = tifffile.imread(mask_path)  # uint8, 1 inside the ROIs, 0 outside
 ```

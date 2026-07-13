@@ -66,6 +66,10 @@ pub struct RoiApp {
     /// "Save mask & quit" one-click workflow used when the app is driven by an
     /// external tool (e.g. a marimo notebook).
     output_path: Option<PathBuf>,
+    /// `--called-from-python`: the app was launched by another application
+    /// waiting on the mask, so the save button reads "Return to main
+    /// application" and hands control back by writing the mask and closing.
+    called_from_python: bool,
 
     // Integration / display.
     integration: Integration,
@@ -110,8 +114,13 @@ pub struct RoiApp {
 }
 
 impl RoiApp {
-    pub fn new(output_path: Option<PathBuf>) -> Self {
+    pub fn new(output_path: Option<PathBuf>, called_from_python: bool) -> Self {
         let status = match &output_path {
+            Some(p) if called_from_python => format!(
+                "Draw the region(s) of interest, then 'Return to main application' \
+                 sends the mask back (via {})",
+                p.display()
+            ),
             Some(p) => format!(
                 "Draw the region(s) of interest, then 'Save mask & quit' writes the mask to {}",
                 p.display()
@@ -122,6 +131,7 @@ impl RoiApp {
             stack: None,
             loading: None,
             output_path,
+            called_from_python,
             integration: Integration::Sum,
             integrated: None,
             data_min: 0.0,
@@ -557,9 +567,23 @@ impl RoiApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let can_save = self.integrated.is_some() && self.selected_count > 0;
                 if let Some(out) = self.output_path.clone() {
+                    let (label, hover) = if self.called_from_python {
+                        (
+                            "⏎ Return to main application",
+                            format!(
+                                "Return the mask to the calling application (written to {}) and close",
+                                out.display()
+                            ),
+                        )
+                    } else {
+                        (
+                            "✅ Save mask & quit",
+                            format!("Write the mask to {} and close", out.display()),
+                        )
+                    };
                     if ui
-                        .add_enabled(can_save, egui::Button::new("✅ Save mask && quit"))
-                        .on_hover_text(format!("Write the mask to {} and close", out.display()))
+                        .add_enabled(can_save, egui::Button::new(label))
+                        .on_hover_text(hover)
                         .clicked()
                         && self.write_mask(&out)
                     {
