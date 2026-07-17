@@ -28,16 +28,21 @@ OPTIONS:
                           NumPy array; ROI pixels = 1, others = 0)
   --called-from-python    The app is driven by another application (e.g. a
                           marimo notebook): the save button becomes
-                          '⏎ Return to main application', which writes the
+                          '↩ Return to main application', which writes the
                           mask to --output (required) and closes the window
                           so the caller can resume.
+  --instructions <TEXT>   Instructions shown in a modal window on top of the
+                          application at startup (e.g. what region the caller
+                          expects to be selected). Reopen any time with the
+                          'ℹ Instructions' toolbar button.
   -h, --help              Show this help
 ";
 
-fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>, bool), String> {
+fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>, bool, Option<String>), String> {
     let mut inputs = Vec::new();
     let mut output = None;
     let mut called_from_python = false;
+    let mut instructions = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -50,6 +55,10 @@ fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>, bool), String> {
                 output = Some(PathBuf::from(path));
             }
             "--called-from-python" | "--called_from_python" => called_from_python = true,
+            "--instructions" => {
+                let text = args.next().ok_or("--instructions requires a text argument")?;
+                instructions = Some(text);
+            }
             s if s.starts_with('-') => return Err(format!("Unknown option: {s}")),
             _ => inputs.push(PathBuf::from(a)),
         }
@@ -57,11 +66,16 @@ fn parse_args() -> Result<(Vec<PathBuf>, Option<PathBuf>, bool), String> {
     if called_from_python && output.is_none() {
         return Err("--called-from-python requires --output <PATH> (where the mask is returned)".to_owned());
     }
-    Ok((inputs, output, called_from_python))
+    if let Some(text) = &instructions {
+        if text.trim().is_empty() {
+            instructions = None;
+        }
+    }
+    Ok((inputs, output, called_from_python, instructions))
 }
 
 fn main() -> eframe::Result<()> {
-    let (inputs, output, called_from_python) = match parse_args() {
+    let (inputs, output, called_from_python, instructions) = match parse_args() {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("Error: {e}\n\n{USAGE}");
@@ -97,7 +111,9 @@ fn main() -> eframe::Result<()> {
         "VENUS ROI Selector",
         native_options,
         Box::new(move |cc| {
-            let mut app = RoiApp::new(output, called_from_python);
+            // Always use the dark theme, regardless of the system/desktop theme.
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
+            let mut app = RoiApp::new(output, called_from_python, instructions);
             if !files.is_empty() {
                 app.start_load(files, &cc.egui_ctx);
             }

@@ -70,6 +70,10 @@ pub struct RoiApp {
     /// waiting on the mask, so the save button reads "Return to main
     /// application" and hands control back by writing the mask and closing.
     called_from_python: bool,
+    /// `--instructions`: text shown in a modal on top of the application at
+    /// startup; reopenable from the toolbar while the app runs.
+    instructions: Option<String>,
+    show_instructions: bool,
 
     // Integration / display.
     integration: Integration,
@@ -114,7 +118,11 @@ pub struct RoiApp {
 }
 
 impl RoiApp {
-    pub fn new(output_path: Option<PathBuf>, called_from_python: bool) -> Self {
+    pub fn new(
+        output_path: Option<PathBuf>,
+        called_from_python: bool,
+        instructions: Option<String>,
+    ) -> Self {
         let status = match &output_path {
             Some(p) if called_from_python => format!(
                 "Draw the region(s) of interest, then 'Return to main application' \
@@ -132,6 +140,8 @@ impl RoiApp {
             loading: None,
             output_path,
             called_from_python,
+            show_instructions: instructions.is_some(),
+            instructions,
             integration: Integration::Sum,
             integrated: None,
             data_min: 0.0,
@@ -160,6 +170,66 @@ impl RoiApp {
             fit_requested: false,
             cursor: None,
             status,
+        }
+    }
+
+    // ----- instructions modal ----------------------------------------------
+
+    /// Modal shown on top of the application when the caller passed
+    /// `--instructions`: an info icon, the caller's text, and a dismiss
+    /// button. Clicking outside the dialog or pressing Escape also closes it.
+    fn instructions_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_instructions {
+            return;
+        }
+        let Some(text) = self.instructions.clone() else {
+            self.show_instructions = false;
+            return;
+        };
+
+        let modal = egui::Modal::new(egui::Id::new("instructions_modal")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+
+            ui.horizontal(|ui| {
+                // Info icon: white ℹ on a filled blue disc.
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(40.0, 40.0), Sense::hover());
+                ui.painter().circle_filled(
+                    rect.center(),
+                    19.0,
+                    Color32::from_rgb(37, 99, 235),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "ℹ",
+                    egui::FontId::proportional(26.0),
+                    Color32::WHITE,
+                );
+                ui.add_space(6.0);
+                ui.heading("Instructions");
+            });
+            ui.separator();
+            ui.add_space(4.0);
+
+            egui::ScrollArea::vertical()
+                .max_height(400.0)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(text).size(15.0));
+                });
+
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                if ui
+                    .button(egui::RichText::new("  Got it  ").size(15.0))
+                    .clicked()
+                {
+                    self.show_instructions = false;
+                }
+            });
+        });
+        if modal.should_close() {
+            self.show_instructions = false;
         }
     }
 
@@ -523,6 +593,13 @@ impl RoiApp {
             if cmap_changed {
                 self.img_dirty = true;
             }
+
+            if self.instructions.is_some() {
+                ui.separator();
+                if ui.button("ℹ Instructions").clicked() {
+                    self.show_instructions = true;
+                }
+            }
         });
 
         ui.horizontal_wrapped(|ui| {
@@ -569,7 +646,7 @@ impl RoiApp {
                 if let Some(out) = self.output_path.clone() {
                     let (label, hover) = if self.called_from_python {
                         (
-                            "⏎ Return to main application",
+                            "↩ Return to main application",
                             format!(
                                 "Return the mask to the calling application (written to {}) and close",
                                 out.display()
@@ -1156,5 +1233,7 @@ impl eframe::App for RoiApp {
         egui::CentralPanel::default().show(ui, |ui| {
             self.viewer(ui);
         });
+
+        self.instructions_modal(&ctx);
     }
 }

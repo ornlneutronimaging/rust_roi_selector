@@ -28,6 +28,10 @@ roi_selector /SNS/VENUS/IPTS-XXXX/.../Run_YYYY
 # Display a pre-integrated 2-D .npy image and write the mask where the
 # caller expects it — the workflow used by the marimo notebooks
 roi_selector integrated_sample.npy --output mask.tif --called-from-python
+
+# Same, with instructions shown in a modal dialog when the app opens
+roi_selector integrated_sample.npy --output mask.tif --called-from-python \
+    --instructions "Draw the region(s) around the sample background."
 ```
 
 - **INPUT** — TIFF file(s) (multi-page supported), a folder of TIFF/`.npy`
@@ -37,9 +41,13 @@ roi_selector integrated_sample.npy --output mask.tif --called-from-python
   writes the mask to `PATH` and closes the app. `.tif`/`.tiff` → 8-bit
   grayscale TIFF; `.npy` → `uint8` NumPy array of shape `(height, width)`.
 - **`--called-from-python`** — the app is driven by another application that
-  is blocked waiting for the mask: the button reads **⏎ Return to main
+  is blocked waiting for the mask: the button reads **↩ Return to main
   application** instead, which writes the mask to `--output` (required with
   this flag) and closes the window so the caller resumes.
+- **`--instructions <TEXT>`** — shows `TEXT` in a modal dialog (ℹ icon) on top
+  of the application at startup, e.g. to tell the user what region the caller
+  expects to be selected. Dismiss with **Got it**, Escape or a click outside
+  the dialog; reopen any time with the **ℹ Instructions** toolbar button.
 - Without `--output`, use **💾 Save mask as…** to pick the destination.
 
 ## Controls
@@ -74,7 +82,7 @@ with tempfile.TemporaryDirectory() as tmp:
         ["roi_selector", str(image_path),
          "--output", str(mask_path), "--called-from-python"],
         check=True,
-    )  # blocks until the user clicks "⏎ Return to main application"
+    )  # blocks until the user clicks "↩ Return to main application"
 
     mask = tifffile.imread(mask_path)  # uint8, 1 inside the ROIs, 0 outside
 ```
