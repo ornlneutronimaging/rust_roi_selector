@@ -48,6 +48,12 @@ roi_selector integrated_sample.npy --output mask.tif --called-from-python \
   of the application at startup, e.g. to tell the user what region the caller
   expects to be selected. Dismiss with **Got it**, Escape or a click outside
   the dialog; reopen any time with the **ℹ Instructions** toolbar button.
+- **`--mask <PATH>`** — an existing mask file (`.tif`/`.tiff`/`.npy`,
+  non-zero = selected) shown as the starting selection, e.g. the mask of a
+  previous session handed back for editing. Additive ROIs add to it, subtract
+  ROIs carve from it, it is included in the saved mask, and the
+  **🗑 Drop initial mask** toolbar button removes it. Ignored if its shape
+  does not match the displayed image.
 - Without `--output`, use **💾 Save mask as…** to pick the destination.
 
 ## Controls

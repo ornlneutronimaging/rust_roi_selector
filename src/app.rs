@@ -74,9 +74,18 @@ pub struct RoiApp {
     /// startup; reopenable from the toolbar while the app runs.
     instructions: Option<String>,
     show_instructions: bool,
+    /// `--mask`: pixels pre-selected from an existing mask file (e.g. the
+    /// result of a previous session, handed back for editing). The composite
+    /// starts from it — additive ROIs add on top, subtract ROIs carve from
+    /// it — and it is applied only while its shape matches the image.
+    initial_mask: Option<Array2<bool>>,
 
     // Integration / display.
     integration: Integration,
+    /// Show the integrated image, or one frame at a time (slider).
+    show_integrated: bool,
+    /// Frame on screen when not integrated.
+    frame_idx: usize,
     integrated: Option<Array2<f32>>,
     data_min: f32,
     data_max: f32,
@@ -122,6 +131,19 @@ impl RoiApp {
         output_path: Option<PathBuf>,
         called_from_python: bool,
         instructions: Option<String>,
+        initial_mask: Option<Array2<bool>>,
+    ) -> Self {
+        Self::with_view(output_path, called_from_python, instructions, initial_mask, true)
+    }
+
+    /// `show_integrated = false` opens on the single-image view (slider
+    /// through the frames — the `--single-image` command-line option).
+    pub fn with_view(
+        output_path: Option<PathBuf>,
+        called_from_python: bool,
+        instructions: Option<String>,
+        initial_mask: Option<Array2<bool>>,
+        show_integrated: bool,
     ) -> Self {
         let status = match &output_path {
             Some(p) if called_from_python => format!(
@@ -135,6 +157,14 @@ impl RoiApp {
             ),
             None => "Open a TIFF stack or a .npy image to begin.".to_owned(),
         };
+        let status = if initial_mask.is_some() {
+            format!(
+                "{status} — the previous mask is shown as the starting \
+                 selection (add to it, carve from it, or drop it)"
+            )
+        } else {
+            status
+        };
         Self {
             stack: None,
             loading: None,
@@ -142,7 +172,10 @@ impl RoiApp {
             called_from_python,
             show_instructions: instructions.is_some(),
             instructions,
+            initial_mask,
             integration: Integration::Sum,
+            show_integrated,
+            frame_idx: 0,
             integrated: None,
             data_min: 0.0,
             data_max: 1.0,
@@ -305,7 +338,12 @@ impl RoiApp {
 
     fn recompute_integration(&mut self) {
         let Some(stack) = &self.stack else { return };
-        let img = integrate(stack, self.integration);
+        let img = if self.show_integrated || stack.frames.len() <= 1 {
+            integrate(stack, self.integration)
+        } else {
+            self.frame_idx = self.frame_idx.min(stack.frames.len() - 1);
+            stack.frames[self.frame_idx].clone()
+        };
 
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for &v in img.iter() {
@@ -356,13 +394,17 @@ impl RoiApp {
         self.mask_tex_dirty = true;
     }
 
-    /// Composite the ROI list (in order) into a boolean mask.
+    /// Composite the ROI list (in order) into a boolean mask, starting from
+    /// the initial mask (`--mask`) when its shape matches the image.
     fn composite_mask(&self) -> Array2<bool> {
         let Some(img) = &self.integrated else {
             return Array2::default((0, 0));
         };
         let (h, w) = (img.shape()[0], img.shape()[1]);
-        let mut m = Array2::<bool>::default((h, w));
+        let mut m = match &self.initial_mask {
+            Some(base) if base.dim() == (h, w) => base.clone(),
+            _ => Array2::<bool>::default((h, w)),
+        };
         for roi in &self.rois {
             roi.geom.stamp(&mut m, roi.additive);
         }
@@ -544,15 +586,36 @@ impl RoiApp {
             let n_frames = self.stack.as_ref().map(|s| s.n_frames()).unwrap_or(0);
             let mut changed = false;
             ui.add_enabled_ui(n_frames > 1, |ui| {
-                egui::ComboBox::from_id_salt("integration")
-                    .selected_text(format!("Integrate: {}", self.integration.label()))
-                    .show_ui(ui, |ui| {
-                        for m in Integration::ALL {
-                            changed |= ui
-                                .selectable_value(&mut self.integration, m, m.label())
-                                .changed();
-                        }
-                    });
+                changed |= ui
+                    .selectable_value(&mut self.show_integrated, true, "Integrated")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.show_integrated, false, "Single image")
+                    .changed();
+                if self.show_integrated {
+                    egui::ComboBox::from_id_salt("integration")
+                        .selected_text(format!("Integrate: {}", self.integration.label()))
+                        .show_ui(ui, |ui| {
+                            for m in Integration::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut self.integration, m, m.label())
+                                    .changed();
+                            }
+                        });
+                } else {
+                    let max = n_frames.saturating_sub(1);
+                    let source = self
+                        .stack
+                        .as_ref()
+                        .and_then(|s| s.sources.get(self.frame_idx.min(max)))
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.frame_idx, 0..=max))
+                        .on_hover_text(source)
+                        .changed();
+                }
             });
             if changed {
                 self.recompute_integration();
@@ -598,6 +661,22 @@ impl RoiApp {
                 ui.separator();
                 if ui.button("ℹ Instructions").clicked() {
                     self.show_instructions = true;
+                }
+            }
+
+            if self.initial_mask.is_some() {
+                ui.separator();
+                if ui
+                    .button("🗑 Drop initial mask")
+                    .on_hover_text(
+                        "Remove the pre-loaded mask (--mask) from the \
+                         selection and start from the drawn ROIs only",
+                    )
+                    .clicked()
+                {
+                    self.initial_mask = None;
+                    self.mask_tex_dirty = true;
+                    self.status = "Initial mask dropped.".to_owned();
                 }
             }
         });
