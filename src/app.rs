@@ -79,6 +79,16 @@ pub struct RoiApp {
     /// starts from it — additive ROIs add on top, subtract ROIs carve from
     /// it — and it is applied only while its shape matches the image.
     initial_mask: Option<Array2<bool>>,
+    /// Directory of the most recently provided data (parent of the first
+    /// loaded file — the data folder itself for folder inputs). Used as the
+    /// starting location of the "Save mask as…" dialog so the mask lands
+    /// next to the data by default.
+    data_dir: Option<PathBuf>,
+    /// `--save-dir`: starting folder of the "Save mask as…" dialog, taking
+    /// precedence over `data_dir`. Set by a calling application whose data
+    /// hand-over lives in an ephemeral temp folder (e.g. the marimo
+    /// notebooks), so interactively saved masks land somewhere durable.
+    save_dir: Option<PathBuf>,
 
     // Integration / display.
     integration: Integration,
@@ -132,8 +142,9 @@ impl RoiApp {
         called_from_python: bool,
         instructions: Option<String>,
         initial_mask: Option<Array2<bool>>,
+        save_dir: Option<PathBuf>,
     ) -> Self {
-        Self::with_view(output_path, called_from_python, instructions, initial_mask, true)
+        Self::with_view(output_path, called_from_python, instructions, initial_mask, save_dir, true)
     }
 
     /// `show_integrated = false` opens on the single-image view (slider
@@ -143,6 +154,7 @@ impl RoiApp {
         called_from_python: bool,
         instructions: Option<String>,
         initial_mask: Option<Array2<bool>>,
+        save_dir: Option<PathBuf>,
         show_integrated: bool,
     ) -> Self {
         let status = match &output_path {
@@ -168,6 +180,8 @@ impl RoiApp {
         Self {
             stack: None,
             loading: None,
+            data_dir: None,
+            save_dir,
             output_path,
             called_from_python,
             show_instructions: instructions.is_some(),
@@ -272,6 +286,12 @@ impl RoiApp {
         if paths.is_empty() {
             return;
         }
+        // Remember where the data lives so "Save mask as…" starts there.
+        self.data_dir = paths
+            .first()
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf());
         let total = paths.len();
         let (tx, rx) = std::sync::mpsc::channel();
         let progress_tx = tx.clone();
@@ -551,13 +571,18 @@ impl RoiApp {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "mask.tif".to_owned());
-        if let Some(path) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .add_filter("TIFF mask", &["tif", "tiff"])
             .add_filter("NumPy mask", &["npy"])
             .set_file_name(default_name)
-            .set_title("Save ROI mask (1 inside the regions, 0 outside)")
-            .save_file()
-        {
+            .set_title("Save ROI mask (1 inside the regions, 0 outside)");
+        // Start in --save-dir when the caller provided one (e.g. a notebook
+        // whose data hand-over lives in a temp folder), otherwise in the
+        // folder the data came from so the mask lands next to the data.
+        if let Some(dir) = self.save_dir.as_ref().or(self.data_dir.as_ref()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.save_file() {
             self.write_mask(&path);
         }
     }

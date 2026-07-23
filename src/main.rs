@@ -41,6 +41,10 @@ OPTIONS:
                           mask of a previous session to edit. Additive ROIs
                           add to it, subtract ROIs carve from it, and it is
                           included in the saved mask.
+  --save-dir <PATH>       Starting folder of the 'Save mask as…' dialog
+                          (default: the folder the displayed data came from).
+                          Useful when the caller hands the data over via a
+                          temporary file.
   --single-image          Open on the single-image view (slider through the
                           frames) instead of the integrated image
   -h, --help              Show this help
@@ -65,6 +69,7 @@ type ParsedArgs = (
     bool,
     Option<String>,
     Option<Array2<bool>>,
+    Option<PathBuf>,
     bool,
 );
 
@@ -74,6 +79,7 @@ fn parse_args() -> Result<ParsedArgs, String> {
     let mut called_from_python = false;
     let mut instructions = None;
     let mut initial_mask = None;
+    let mut save_dir = None;
     let mut single_image = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -87,6 +93,10 @@ fn parse_args() -> Result<ParsedArgs, String> {
                 output = Some(PathBuf::from(path));
             }
             "--called-from-python" | "--called_from_python" => called_from_python = true,
+            "--save-dir" | "--save_dir" => {
+                let path = args.next().ok_or("--save-dir requires a path")?;
+                save_dir = Some(PathBuf::from(path));
+            }
             "--single-image" | "--single_image" => single_image = true,
             "--instructions" => {
                 let text = args.next().ok_or("--instructions requires a text argument")?;
@@ -108,11 +118,11 @@ fn parse_args() -> Result<ParsedArgs, String> {
             instructions = None;
         }
     }
-    Ok((inputs, output, called_from_python, instructions, initial_mask, single_image))
+    Ok((inputs, output, called_from_python, instructions, initial_mask, save_dir, single_image))
 }
 
 fn main() -> eframe::Result<()> {
-    let (inputs, output, called_from_python, instructions, initial_mask, single_image) = match parse_args() {
+    let (inputs, output, called_from_python, instructions, initial_mask, save_dir, single_image) = match parse_args() {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("Error: {e}\n\n{USAGE}");
@@ -155,6 +165,7 @@ fn main() -> eframe::Result<()> {
                 called_from_python,
                 instructions,
                 initial_mask,
+                save_dir,
                 !single_image,
             );
             if !files.is_empty() {
