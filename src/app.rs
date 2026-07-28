@@ -18,6 +18,8 @@ use std::sync::mpsc::Receiver;
 const UNDO_DEPTH: usize = 24;
 const HANDLE_HIT: f32 = 10.0;
 const HANDLE_SIZE: f32 = 9.0;
+/// Width of the colorbar column: gradient strip + ticks + value labels.
+const COLORBAR_WIDTH: f32 = 78.0;
 
 /// Messages sent from the background loading thread to the UI.
 enum LoadMsg {
@@ -106,6 +108,8 @@ pub struct RoiApp {
     // Textures.
     img_tex: Option<TextureHandle>,
     mask_tex: Option<TextureHandle>,
+    /// Vertical gradient strip of the current colormap, drawn as the colorbar.
+    cbar_tex: Option<TextureHandle>,
     img_dirty: bool,
     mask_tex_dirty: bool,
 
@@ -198,6 +202,7 @@ impl RoiApp {
             colormap: Colormap::Viridis,
             img_tex: None,
             mask_tex: None,
+            cbar_tex: None,
             img_dirty: false,
             mask_tex_dirty: false,
             rois: Vec::new(),
@@ -481,6 +486,19 @@ impl RoiApp {
         }
         let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &buf);
         self.img_tex = Some(ctx.load_texture("integrated", color, TextureOptions::NEAREST));
+
+        // Colorbar strip: 1×256, high values at the top.
+        let mut cbuf = vec![0u8; 256 * 4];
+        for j in 0..256 {
+            let [r, g, b] = lut[255 - j];
+            cbuf[j * 4] = r;
+            cbuf[j * 4 + 1] = g;
+            cbuf[j * 4 + 2] = b;
+            cbuf[j * 4 + 3] = 255;
+        }
+        let cbar = egui::ColorImage::from_rgba_unmultiplied([1, 256], &cbuf);
+        self.cbar_tex = Some(ctx.load_texture("colorbar", cbar, TextureOptions::LINEAR));
+
         self.img_dirty = false;
     }
 
@@ -885,30 +903,88 @@ impl RoiApp {
         };
         let (h, w) = (img.shape()[0], img.shape()[1]);
 
-        if self.fit_requested && w > 0 && h > 0 {
+        ui.horizontal_top(|ui| {
             let avail = ui.available_size();
-            let s = (avail.x / w as f32).min(avail.y / h as f32);
-            self.scale = s.clamp(0.02, 64.0);
-            self.fit_requested = false;
-        }
+            let view_w = (avail.x - COLORBAR_WIDTH - ui.spacing().item_spacing.x).max(50.0);
 
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let size = egui::vec2(w as f32 * self.scale, h as f32 * self.scale);
-                let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+            if self.fit_requested && w > 0 && h > 0 {
+                let s = (view_w / w as f32).min(avail.y / h as f32);
+                self.scale = s.clamp(0.02, 64.0);
+                self.fit_requested = false;
+            }
 
-                let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                let painter = ui.painter_at(rect);
-                if let Some(t) = &self.img_tex {
-                    painter.image(t.id(), rect, full_uv, Color32::WHITE);
-                }
-                if let Some(t) = &self.mask_tex {
-                    painter.image(t.id(), rect, full_uv, Color32::WHITE);
-                }
+            ui.allocate_ui(egui::vec2(view_w, avail.y), |ui| {
+                ui.set_min_size(egui::vec2(view_w, avail.y));
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let size = egui::vec2(w as f32 * self.scale, h as f32 * self.scale);
+                        let (rect, response) =
+                            ui.allocate_exact_size(size, Sense::click_and_drag());
 
-                self.handle_interaction(&painter, rect, &response, w, h);
+                        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                        let painter = ui.painter_at(rect);
+                        if let Some(t) = &self.img_tex {
+                            painter.image(t.id(), rect, full_uv, Color32::WHITE);
+                        }
+                        if let Some(t) = &self.mask_tex {
+                            painter.image(t.id(), rect, full_uv, Color32::WHITE);
+                        }
+
+                        self.handle_interaction(&painter, rect, &response, w, h);
+                    });
             });
+
+            self.colorbar(ui, avail.y);
+        });
+    }
+
+    /// Vertical colorbar: the colormap gradient with tick labels running from
+    /// `vmin` (bottom) to `vmax` (top). Reflects the live contrast settings.
+    fn colorbar(&self, ui: &mut egui::Ui, height: f32) {
+        let Some(tex) = &self.cbar_tex else { return };
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(COLORBAR_WIDTH, height), Sense::hover());
+        let painter = ui.painter_at(rect);
+        let font = egui::TextStyle::Small.resolve(ui.style());
+        let text_color = ui.visuals().text_color();
+
+        // Inset so the top/bottom tick labels are not clipped.
+        let pad = font.size * 0.6;
+        let bar = Rect::from_min_max(
+            Pos2::new(rect.left() + 2.0, rect.top() + pad),
+            Pos2::new(rect.left() + 2.0 + 16.0, rect.bottom() - pad),
+        );
+        if bar.height() < 20.0 {
+            return;
+        }
+        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        painter.image(tex.id(), bar, full_uv, Color32::WHITE);
+        painter.rect_stroke(
+            bar,
+            egui::CornerRadius::ZERO,
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color),
+            egui::StrokeKind::Outside,
+        );
+
+        // As many ticks as comfortably fit, capped at 7.
+        let n_ticks = ((bar.height() / 60.0).floor() as usize + 2).clamp(2, 7);
+        for i in 0..n_ticks {
+            let t = i as f32 / (n_ticks - 1) as f32;
+            let y = bar.bottom() - t * bar.height();
+            let v = self.vmin + t * (self.vmax - self.vmin);
+            painter.line_segment(
+                [Pos2::new(bar.right(), y), Pos2::new(bar.right() + 4.0, y)],
+                Stroke::new(1.0, text_color),
+            );
+            painter.text(
+                Pos2::new(bar.right() + 6.0, y),
+                egui::Align2::LEFT_CENTER,
+                fmt_tick(v),
+                font.clone(),
+                text_color,
+            );
+        }
     }
 
     fn handle_interaction(
@@ -1089,6 +1165,23 @@ impl RoiApp {
             let sel = self.selected == Some(roi.id);
             draw_roi(painter, &roi.geom, roi.additive, sel, &to_screen, scale);
         }
+    }
+}
+
+/// Compact tick label: plain decimals in a comfortable range, scientific
+/// notation for very large/small magnitudes.
+fn fmt_tick(v: f32) -> String {
+    let a = v.abs();
+    if a == 0.0 {
+        "0".to_owned()
+    } else if a >= 100_000.0 || a < 0.001 {
+        format!("{v:.2e}")
+    } else if a >= 100.0 {
+        format!("{v:.0}")
+    } else if a >= 1.0 {
+        format!("{v:.2}")
+    } else {
+        format!("{v:.4}")
     }
 }
 
