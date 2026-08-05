@@ -208,24 +208,31 @@ fn load_npy(path: &Path) -> Result<Vec<Array2<f32>>> {
     )
 }
 
-/// Turn a flat, row-major buffer into an `(h, w)` array. If the buffer carries
-/// several samples per pixel (e.g. RGB TIFF) only the first sample is kept.
+/// Turn a flat, row-major buffer into a frame. If the buffer carries several
+/// samples per pixel (e.g. RGB TIFF) only the first sample is kept.
+///
+/// TIFF pages are transposed on the way in: the VENUS detectors write them
+/// with rows/columns swapped relative to the sample orientation (same
+/// convention as rust_tiff_viewer and the hype_control COR preview). The
+/// .npy path is NOT transposed — those arrays come from Python callers that
+/// already pass display-ready data.
 fn to_frame(values: Vec<f32>, w: usize, h: usize) -> Result<Array2<f32>> {
     let expected = w * h;
-    if values.len() == expected {
-        return Ok(Array2::from_shape_vec((h, w), values)?);
-    }
-    if expected > 0 && values.len() % expected == 0 {
+    let frame = if values.len() == expected {
+        Array2::from_shape_vec((h, w), values)?
+    } else if expected > 0 && values.len() % expected == 0 {
         let spp = values.len() / expected;
         let first: Vec<f32> = (0..expected).map(|i| values[i * spp]).collect();
-        return Ok(Array2::from_shape_vec((h, w), first)?);
-    }
-    bail!(
-        "Pixel count {} is not compatible with {}x{}",
-        values.len(),
-        w,
-        h
-    )
+        Array2::from_shape_vec((h, w), first)?
+    } else {
+        bail!(
+            "Pixel count {} is not compatible with {}x{}",
+            values.len(),
+            w,
+            h
+        )
+    };
+    Ok(frame.reversed_axes().as_standard_layout().into_owned())
 }
 
 #[cfg(test)]

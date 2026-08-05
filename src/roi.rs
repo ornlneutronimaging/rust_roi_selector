@@ -163,6 +163,10 @@ pub fn save_mask(path: &Path, mask: &Array2<bool>) -> Result<()> {
         "tif" | "tiff" => {
             use tiff::encoder::{colortype::Gray8, TiffEncoder};
 
+            // TIFFs on disk are in the raw detector orientation (the loader
+            // transposes them for display): transpose the mask back on save so
+            // it aligns pixel-for-pixel with the raw files it will be applied to
+            let mask = mask.t();
             let (h, w) = (mask.shape()[0], mask.shape()[1]);
             let file = std::fs::File::create(path)
                 .with_context(|| format!("create {}", path.display()))?;
