@@ -148,7 +148,18 @@ impl Geometry {
 ///
 /// The format follows the extension: `.tif`/`.tiff` writes an 8-bit grayscale
 /// TIFF, `.npy` a NumPy `uint8` array of shape `(height, width)`.
-pub fn save_mask(path: &Path, mask: &Array2<bool>) -> Result<()> {
+///
+/// `undo_display_transpose` must be the `transposed_on_load` flag of the
+/// stack the mask was drawn on: when the loader transposed the input for
+/// display (TIFF files), the mask is transposed back on save so it aligns
+/// pixel-for-pixel with the input files as they are on disk; `.npy` input is
+/// loaded as-is, so its masks are saved as-is.
+pub fn save_mask(path: &Path, mask: &Array2<bool>, undo_display_transpose: bool) -> Result<()> {
+    let mask = if undo_display_transpose {
+        mask.t()
+    } else {
+        mask.view()
+    };
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -163,10 +174,6 @@ pub fn save_mask(path: &Path, mask: &Array2<bool>) -> Result<()> {
         "tif" | "tiff" => {
             use tiff::encoder::{colortype::Gray8, TiffEncoder};
 
-            // TIFFs on disk are in the raw detector orientation (the loader
-            // transposes them for display): transpose the mask back on save so
-            // it aligns pixel-for-pixel with the raw files it will be applied to
-            let mask = mask.t();
             let (h, w) = (mask.shape()[0], mask.shape()[1]);
             let file = std::fs::File::create(path)
                 .with_context(|| format!("create {}", path.display()))?;
@@ -258,7 +265,7 @@ mod tests {
         let path = dir.join("mask.npy");
         let mut m = Array2::<bool>::default((4, 5));
         m[(1, 2)] = true;
-        save_mask(&path, &m).unwrap();
+        save_mask(&path, &m, false).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let back = Array2::<u8>::read_npy(file).unwrap();
@@ -269,12 +276,15 @@ mod tests {
 
     #[test]
     fn save_mask_tiff_roundtrips_as_ones_and_zeros() {
+        // TIFF input is transposed on load, so a mask drawn on it is saved
+        // with the transpose undone — reloading through the loader (which
+        // transposes again) round-trips to the drawn orientation.
         let dir = tmp_dir("tiff");
         let path = dir.join("mask.tif");
         let mut m = Array2::<bool>::default((4, 5));
         m[(3, 4)] = true;
         m[(0, 0)] = true;
-        save_mask(&path, &m).unwrap();
+        save_mask(&path, &m, true).unwrap();
 
         let stack = crate::loader::load_paths(&[path]).unwrap();
         assert_eq!((stack.height, stack.width), (4, 5));
@@ -285,9 +295,26 @@ mod tests {
     }
 
     #[test]
+    fn save_mask_without_undo_keeps_the_drawn_orientation() {
+        // .npy input is loaded as-is, so its mask is saved as-is: the raw
+        // TIFF on disk keeps the drawn (height, width) orientation. The
+        // loader transposes TIFFs on read, hence the swapped indices here.
+        let dir = tmp_dir("tiff_no_undo");
+        let path = dir.join("mask.tif");
+        let mut m = Array2::<bool>::default((4, 5));
+        m[(1, 2)] = true;
+        save_mask(&path, &m, false).unwrap();
+
+        let stack = crate::loader::load_paths(&[path]).unwrap();
+        assert_eq!((stack.height, stack.width), (5, 4));
+        assert_eq!(stack.frames[0][(2, 1)], 1.0);
+        assert_eq!(stack.frames[0].iter().sum::<f32>(), 1.0);
+    }
+
+    #[test]
     fn save_mask_rejects_unknown_extension() {
         let dir = tmp_dir("ext");
         let m = Array2::<bool>::default((2, 2));
-        assert!(save_mask(&dir.join("mask.png"), &m).is_err());
+        assert!(save_mask(&dir.join("mask.png"), &m, false).is_err());
     }
 }

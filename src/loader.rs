@@ -21,6 +21,11 @@ pub struct ImageStack {
     pub height: usize,
     /// Source file for each frame (parallel to `frames`); useful for the UI.
     pub sources: Vec<PathBuf>,
+    /// Whether the frames were transposed on load (TIFF input — see
+    /// [`to_frame`]). A mask saved from this stack must be transposed back so
+    /// it aligns with the input files as they are on disk; `.npy` input is
+    /// loaded as-is, so its masks must not be.
+    pub transposed_on_load: bool,
 }
 
 impl ImageStack {
@@ -61,10 +66,14 @@ where
     let mut frames: Vec<Array2<f32>> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     let mut dims: Option<(usize, usize)> = None;
+    let mut transposed_on_load = false;
 
     for (idx, path) in sorted.iter().enumerate() {
         let loaded = match ext_of(path).as_str() {
-            "tif" | "tiff" => load_tiff(path)?,
+            "tif" | "tiff" => {
+                transposed_on_load = true;
+                load_tiff(path)?
+            }
             "npy" => load_npy(path)?,
             other => bail!("Unsupported file type '.{other}': {}", path.display()),
         };
@@ -97,6 +106,7 @@ where
         width,
         height,
         sources,
+        transposed_on_load,
     })
 }
 

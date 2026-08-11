@@ -559,7 +559,13 @@ impl RoiApp {
     fn write_mask(&mut self, path: &std::path::Path) -> bool {
         let mask = self.composite_mask();
         let count = mask.iter().filter(|&&b| b).count();
-        match save_mask(path, &mask) {
+        // Align the saved mask with the input files as they are on disk: undo
+        // the display transpose only when the loader applied one (TIFF input).
+        let undo_transpose = self
+            .stack
+            .as_ref()
+            .is_some_and(|s| s.transposed_on_load);
+        match save_mask(path, &mask, undo_transpose) {
             Ok(()) => {
                 self.status = format!(
                     "Saved mask ({count} px = 1) to {}",
