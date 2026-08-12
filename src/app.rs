@@ -728,6 +728,9 @@ impl RoiApp {
                     self.status = "Initial mask dropped.".to_owned();
                 }
             }
+
+            ui.separator();
+            crate::theme::toggle_button(ui);
         });
 
         ui.horizontal_wrapped(|ui| {

@@ -8,3 +8,4 @@ pub mod colormap;
 pub mod integrate;
 pub mod loader;
 pub mod roi;
+pub mod theme;
