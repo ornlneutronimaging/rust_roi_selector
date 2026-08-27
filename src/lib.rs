@@ -9,3 +9,4 @@ pub mod integrate;
 pub mod loader;
 pub mod roi;
 pub mod theme;
+pub mod zoom;

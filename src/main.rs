@@ -161,6 +161,7 @@ fn main() -> eframe::Result<()> {
             // Saved light/dark preference, shared by all the VENUS rust
             // tools (dark when none is saved); the toolbar has a toggle.
             cc.egui_ctx.set_theme(roi_selector::theme::load());
+            cc.egui_ctx.set_zoom_factor(roi_selector::zoom::load());
             let mut app = RoiApp::with_view(
                 output,
                 called_from_python,
