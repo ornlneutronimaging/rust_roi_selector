@@ -11,5 +11,5 @@ eframe = "0.35"
 egui = "0.35"
 ndarray = "0.17"
 ndarray-npy = "0.10"
-rfd = "0.17"
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
 tiff = "0.11"
