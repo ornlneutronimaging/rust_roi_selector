@@ -7,7 +7,7 @@
 
 use crate::colormap::Colormap;
 use crate::integrate::{integrate, Integration};
-use crate::loader::{self, ImageStack};
+use crate::loader::{self, Detector, ImageStack, Orientation, Selection};
 use crate::roi::{save_mask, Geometry, Tool};
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions};
@@ -77,10 +77,17 @@ pub struct RoiApp {
     instructions: Option<String>,
     show_instructions: bool,
     /// `--mask`: pixels pre-selected from an existing mask file (e.g. the
-    /// result of a previous session, handed back for editing). The composite
+    /// result of a previous session, handed back for editing), kept in the
+    /// on-disk orientation and re-oriented like the stack. The composite
     /// starts from it — additive ROIs add on top, subtract ROIs carve from
     /// it — and it is applied only while its shape matches the image.
     initial_mask: Option<Array2<bool>>,
+    /// Detector chosen by the user (toolbar combobox / `--detector`), which
+    /// decides how TIFF frames are oriented on load; `None` = guess it from
+    /// the folder layout (images/tpx1, images/ikonxl, …).
+    detector_override: Option<Detector>,
+    /// Files of the current stack, reloaded when the detector changes.
+    loaded_paths: Vec<PathBuf>,
     /// Directory of the most recently provided data (parent of the first
     /// loaded file — the data folder itself for folder inputs). Used as the
     /// starting location of the "Save mask as…" dialog so the mask lands
@@ -135,6 +142,9 @@ pub struct RoiApp {
     // View.
     scale: f32,
     fit_requested: bool,
+    /// Scroll offset to apply to the image viewport on the next frame, set by
+    /// a Ctrl+wheel zoom so the image point under the cursor stays put.
+    viewer_scroll: Option<egui::Vec2>,
     cursor: Option<(usize, usize, f32)>,
 
     status: String,
@@ -191,6 +201,8 @@ impl RoiApp {
             show_instructions: instructions.is_some(),
             instructions,
             initial_mask,
+            detector_override: None,
+            loaded_paths: Vec::new(),
             integration: Integration::Sum,
             show_integrated,
             frame_idx: 0,
@@ -220,6 +232,7 @@ impl RoiApp {
             drag_start: None,
             scale: 1.0,
             fit_requested: false,
+            viewer_scroll: None,
             cursor: None,
             status,
         }
@@ -287,6 +300,76 @@ impl RoiApp {
 
     // ----- loading & integration -------------------------------------------
 
+    /// Force the detector (hence the orientation) the stack is loaded with,
+    /// `None` to go back to the automatic guess (`--detector`).
+    pub fn set_detector_override(&mut self, detector: Option<Detector>) {
+        self.detector_override = detector;
+    }
+
+    /// Detector to load `path` with: the user's override, else the folder
+    /// layout.
+    fn detector_for(&self, path: &std::path::Path) -> Selection {
+        let mut sel = Selection::from_path(path);
+        sel.manual = self.detector_override;
+        sel
+    }
+
+    /// Orientation of the stack on screen (`Identity` when nothing is loaded).
+    fn orientation(&self) -> Orientation {
+        self.stack.as_ref().map(|s| s.orientation).unwrap_or_default()
+    }
+
+    /// Toolbar combobox choosing the detector (hence the orientation on
+    /// load): "auto" follows the folder layout, the other entries force one.
+    /// Changing it reloads the stack.
+    fn detector_combo(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label("Detector:").on_hover_text(
+            "How the frames are oriented on load: Timepix → transposed, CCD → flipped \
+             vertically, QHY → not decided yet (as-is). 'auto' recognizes the detector from \
+             the folder layout (images/tpx1, images/ikonxl, …).",
+        );
+        let auto_text = match self.stack.as_ref() {
+            Some(s) if s.detector.is_auto() => format!("auto: {}", s.detector.summary()),
+            _ => "auto".to_owned(),
+        };
+        let current = match self.detector_override {
+            None => auto_text.clone(),
+            Some(d) => d.label().to_owned(),
+        };
+        let mut changed = false;
+        egui::ComboBox::from_id_salt("detector")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(self.detector_override.is_none(), auto_text)
+                    .on_hover_text("Guess the detector from the folder layout")
+                    .clicked()
+                    && self.detector_override.is_some()
+                {
+                    self.detector_override = None;
+                    changed = true;
+                }
+                for d in Detector::ALL {
+                    if ui
+                        .selectable_label(self.detector_override == Some(d), d.label())
+                        .on_hover_text(d.description())
+                        .clicked()
+                        && self.detector_override != Some(d)
+                    {
+                        self.detector_override = Some(d);
+                        changed = true;
+                    }
+                }
+            });
+        if let Some(s) = self.stack.as_ref() {
+            ui.label(egui::RichText::new(s.orientation.label()).weak())
+                .on_hover_text(s.detector.detector().description());
+        }
+        if changed && !self.loaded_paths.is_empty() {
+            self.start_load(self.loaded_paths.clone(), ctx);
+        }
+    }
+
     pub fn start_load(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         if paths.is_empty() {
             return;
@@ -297,13 +380,15 @@ impl RoiApp {
             .and_then(|p| p.parent())
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.to_path_buf());
+        self.loaded_paths = paths.clone();
+        let detector = self.detector_for(&paths[0]);
         let total = paths.len();
         let (tx, rx) = std::sync::mpsc::channel();
         let progress_tx = tx.clone();
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let result = loader::load_paths_with_progress(&paths, |done, total| {
+            let result = loader::load_paths_with_progress(&paths, detector, |done, total| {
                 let _ = progress_tx.send(LoadMsg::Progress { done, total });
                 ctx.request_repaint();
             });
@@ -358,7 +443,14 @@ impl RoiApp {
         self.recompute_integration();
         self.fit_requested = true;
         self.mask_tex_dirty = true;
-        self.status = format!("Loaded {n} frame(s), {w}×{h} px (from {first} …).");
+        let (detector, orientation) = self
+            .stack
+            .as_ref()
+            .map(|s| (s.detector.summary(), s.orientation))
+            .unwrap_or_default();
+        self.status = format!(
+            "Loaded {n} frame(s), {w}×{h} px, {detector}: {orientation} (from {first} …)."
+        );
     }
 
     fn recompute_integration(&mut self) {
@@ -426,10 +518,13 @@ impl RoiApp {
             return Array2::default((0, 0));
         };
         let (h, w) = (img.shape()[0], img.shape()[1]);
-        let mut m = match &self.initial_mask {
-            Some(base) if base.dim() == (h, w) => base.clone(),
-            _ => Array2::<bool>::default((h, w)),
-        };
+        // The initial mask is kept as on disk; orient it like the stack.
+        let base = self
+            .initial_mask
+            .as_ref()
+            .map(|m| self.orientation().apply(m.clone()))
+            .filter(|m| m.dim() == (h, w));
+        let mut m = base.unwrap_or_else(|| Array2::<bool>::default((h, w)));
         for roi in &self.rois {
             roi.geom.stamp(&mut m, roi.additive);
         }
@@ -560,12 +655,8 @@ impl RoiApp {
         let mask = self.composite_mask();
         let count = mask.iter().filter(|&&b| b).count();
         // Align the saved mask with the input files as they are on disk: undo
-        // the display transpose only when the loader applied one (TIFF input).
-        let undo_transpose = self
-            .stack
-            .as_ref()
-            .is_some_and(|s| s.transposed_on_load);
-        match save_mask(path, &mask, undo_transpose) {
+        // the orientation the loader applied (TIFF input; `.npy` is as-is).
+        match save_mask(path, &mask, self.orientation()) {
             Ok(()) => {
                 self.status = format!(
                     "Saved mask ({count} px = 1) to {}",
@@ -630,6 +721,8 @@ impl RoiApp {
                 self.open_folder_dialog(&ctx);
             }
 
+            ui.separator();
+            ui.add_enabled_ui(!busy, |ui| self.detector_combo(ui, &ctx));
             ui.separator();
 
             let n_frames = self.stack.as_ref().map(|s| s.n_frames()).unwrap_or(0);
@@ -755,7 +848,8 @@ impl RoiApp {
             }
 
             ui.separator();
-            ui.label("Zoom:");
+            ui.label("Zoom:")
+                .on_hover_text("Ctrl + mouse wheel over the image zooms around the cursor");
             if ui.button("−").clicked() {
                 self.scale = (self.scale / 1.25).max(0.02);
             }
@@ -925,24 +1019,57 @@ impl RoiApp {
 
             ui.allocate_ui(egui::vec2(view_w, avail.y), |ui| {
                 ui.set_min_size(egui::vec2(view_w, avail.y));
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let size = egui::vec2(w as f32 * self.scale, h as f32 * self.scale);
-                        let (rect, response) =
-                            ui.allocate_exact_size(size, Sense::click_and_drag());
+                let mut scroll = egui::ScrollArea::both().auto_shrink([false, false]);
+                if let Some(offset) = self.viewer_scroll.take() {
+                    scroll = scroll.scroll_offset(offset);
+                }
+                // A Ctrl+wheel zoom over the image: (image x, image y under
+                // the cursor, zoom factor). Applied after the scroll area
+                // reports its current offset, so the next frame's scale and
+                // offset match.
+                let mut wheel_zoom: Option<(f32, f32, f32)> = None;
+                let out = scroll.show(ui, |ui| {
+                    let size = egui::vec2(w as f32 * self.scale, h as f32 * self.scale);
+                    let (rect, response) =
+                        ui.allocate_exact_size(size, Sense::click_and_drag());
 
-                        let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                        let painter = ui.painter_at(rect);
-                        if let Some(t) = &self.img_tex {
-                            painter.image(t.id(), rect, full_uv, Color32::WHITE);
-                        }
-                        if let Some(t) = &self.mask_tex {
-                            painter.image(t.id(), rect, full_uv, Color32::WHITE);
-                        }
+                    let full_uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                    let painter = ui.painter_at(rect);
+                    if let Some(t) = &self.img_tex {
+                        painter.image(t.id(), rect, full_uv, Color32::WHITE);
+                    }
+                    if let Some(t) = &self.mask_tex {
+                        painter.image(t.id(), rect, full_uv, Color32::WHITE);
+                    }
 
-                        self.handle_interaction(&painter, rect, &response, w, h);
-                    });
+                    self.handle_interaction(&painter, rect, &response, w, h);
+
+                    // egui turns Ctrl (Cmd on macOS) + wheel into a zoom
+                    // factor instead of a scroll; a pinch arrives the same way.
+                    if response.contains_pointer() {
+                        let factor = ui.input(|i| i.zoom_delta());
+                        if factor != 1.0
+                            && let Some(p) = response.hover_pos()
+                        {
+                            let ix = (p.x - rect.left()) / self.scale;
+                            let iy = (p.y - rect.top()) / self.scale;
+                            wheel_zoom = Some((ix, iy, factor));
+                        }
+                    }
+                });
+                if let Some((ix, iy, factor)) = wheel_zoom {
+                    let old = self.scale;
+                    let new = (old * factor).clamp(0.02, 64.0);
+                    if new != old {
+                        // Keep the image point (ix, iy) under the cursor: the
+                        // content shifts by its distance to the origin times
+                        // the scale change.
+                        let offset = out.state.offset + egui::vec2(ix, iy) * (new - old);
+                        self.viewer_scroll = Some(offset.max(egui::Vec2::ZERO));
+                        self.scale = new;
+                        ui.ctx().request_repaint();
+                    }
+                }
             });
 
             self.colorbar(ui, avail.y);
