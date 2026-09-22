@@ -47,13 +47,23 @@ OPTIONS:
                           temporary file.
   --single-image          Open on the single-image view (slider through the
                           frames) instead of the integrated image
+  --detector <NAME>       Force the detector the TIFF frames are loaded as,
+                          which decides their orientation: timepix (frames
+                          transposed), ccd (flipped vertically), qhy (as-is,
+                          not decided yet) or as-is. By default the detector
+                          is recognized from the folder layout (images/tpx1,
+                          images/ikonxl, …); the toolbar has a combobox to
+                          change it. Saved masks are always written in the
+                          on-disk orientation of the input files.
   -h, --help              Show this help
 ";
 
 /// Read an existing mask file into a boolean array (non-zero = selected),
 /// reusing the image loader so the same formats are accepted.
 fn load_initial_mask(path: &PathBuf) -> Result<Array2<bool>, String> {
-    let stack = loader::load_paths(&[path.clone()])
+    // Masks are stored in the on-disk orientation of the data; the app
+    // re-orients this one like the stack it is drawn on.
+    let stack = loader::load_paths_as(&[path.clone()], loader::Detector::Unknown)
         .map_err(|e| format!("cannot read mask {}: {e:#}", path.display()))?;
     let frame = stack
         .frames
@@ -71,6 +81,7 @@ type ParsedArgs = (
     Option<Array2<bool>>,
     Option<PathBuf>,
     bool,
+    Option<loader::Detector>,
 );
 
 fn parse_args() -> Result<ParsedArgs, String> {
@@ -81,6 +92,7 @@ fn parse_args() -> Result<ParsedArgs, String> {
     let mut initial_mask = None;
     let mut save_dir = None;
     let mut single_image = false;
+    let mut detector = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -98,6 +110,12 @@ fn parse_args() -> Result<ParsedArgs, String> {
                 save_dir = Some(PathBuf::from(path));
             }
             "--single-image" | "--single_image" => single_image = true,
+            "--detector" => {
+                let v = args.next().ok_or("--detector requires timepix, ccd, qhy or as-is")?;
+                detector = Some(loader::Detector::parse(&v).ok_or_else(|| {
+                    format!("invalid --detector '{v}': expected timepix, ccd, qhy or as-is")
+                })?);
+            }
             "--instructions" => {
                 let text = args.next().ok_or("--instructions requires a text argument")?;
                 instructions = Some(text);
@@ -118,11 +136,29 @@ fn parse_args() -> Result<ParsedArgs, String> {
             instructions = None;
         }
     }
-    Ok((inputs, output, called_from_python, instructions, initial_mask, save_dir, single_image))
+    Ok((
+        inputs,
+        output,
+        called_from_python,
+        instructions,
+        initial_mask,
+        save_dir,
+        single_image,
+        detector,
+    ))
 }
 
 fn main() -> eframe::Result<()> {
-    let (inputs, output, called_from_python, instructions, initial_mask, save_dir, single_image) = match parse_args() {
+    let (
+        inputs,
+        output,
+        called_from_python,
+        instructions,
+        initial_mask,
+        save_dir,
+        single_image,
+        detector,
+    ) = match parse_args() {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("Error: {e}\n\n{USAGE}");
@@ -158,6 +194,7 @@ fn main() -> eframe::Result<()> {
         "VENUS ROI Selector",
         native_options,
         Box::new(move |cc| {
+            install_fonts(&cc.egui_ctx);
             // Saved light/dark preference, shared by all the VENUS rust
             // tools (dark when none is saved); the toolbar has a toggle.
             cc.egui_ctx.set_theme(roi_selector::theme::load());
@@ -170,10 +207,25 @@ fn main() -> eframe::Result<()> {
                 save_dir,
                 !single_image,
             );
+            app.set_detector_override(detector);
             if !files.is_empty() {
                 app.start_load(files, &cc.egui_ctx);
             }
             Ok(Box::new(app))
         }),
     )
+}
+
+/// egui's proportional family (Ubuntu-Light + the emoji fonts) has no glyph
+/// for the arrows (→ ← ↑ ↓), bullets and similar symbols used in the labels,
+/// which then show up as squares; the bundled monospace font Hack has them,
+/// so it is appended as the last fallback of the proportional family.
+fn install_fonts(ctx: &eframe::egui::Context) {
+    let mut fonts = eframe::egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&eframe::egui::FontFamily::Proportional) {
+        if !family.iter().any(|f| f == "Hack") {
+            family.push("Hack".to_owned());
+        }
+    }
+    ctx.set_fonts(fonts);
 }

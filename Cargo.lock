@@ -808,6 +808,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "detector_orientation"
+version = "0.1.0"
+dependencies = [
+ "ndarray",
+]
+
+[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2943,6 +2950,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "colorgrad",
+ "detector_orientation",
  "eframe",
  "egui",
  "ndarray",

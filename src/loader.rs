@@ -8,9 +8,13 @@
 //!
 //! Every frame is normalised to an `Array2<f32>` with shape `(height, width)`,
 //! row-major, so the rest of the program never has to care about the on-disk
-//! sample format.
+//! sample format. TIFF frames are re-oriented according to the detector that
+//! wrote them (see [`detector_orientation`]: Timepix transposed, CCD flipped
+//! vertically, QHY not decided yet / unknown as-is); `.npy` arrays come from
+//! Python callers that already pass display-ready data and are loaded as-is.
 
 use anyhow::{anyhow, bail, Context, Result};
+pub use detector_orientation::{Detector, Orientation, Selection, Source};
 use ndarray::{Array2, Array3};
 use std::path::{Path, PathBuf};
 
@@ -21,11 +25,13 @@ pub struct ImageStack {
     pub height: usize,
     /// Source file for each frame (parallel to `frames`); useful for the UI.
     pub sources: Vec<PathBuf>,
-    /// Whether the frames were transposed on load (TIFF input — see
-    /// [`to_frame`]). A mask saved from this stack must be transposed back so
-    /// it aligns with the input files as they are on disk; `.npy` input is
-    /// loaded as-is, so its masks must not be.
-    pub transposed_on_load: bool,
+    /// Detector the stack was recorded with (automatic guess + user override).
+    pub detector: Selection,
+    /// How the TIFF frames were re-oriented on load (see [`to_frame`]). A
+    /// mask saved from this stack must be put back in the on-disk orientation
+    /// with [`Orientation::undo`] so it aligns with the input files; `.npy`
+    /// input is loaded as-is (`Identity`), so its masks are saved as-is.
+    pub orientation: Orientation,
 }
 
 impl ImageStack {
@@ -44,14 +50,28 @@ fn ext_of(path: &Path) -> String {
         .to_lowercase()
 }
 
-/// Load and concatenate every frame contained in `paths`, in sorted order.
+/// Load and concatenate every frame contained in `paths`, in sorted order,
+/// with the detector guessed from the first path (see [`Selection::from_path`]).
 pub fn load_paths(paths: &[PathBuf]) -> Result<ImageStack> {
-    load_paths_with_progress(paths, |_, _| {})
+    let detector = paths.first().map(|p| Selection::from_path(p)).unwrap_or_default();
+    load_paths_with_progress(paths, detector, |_, _| {})
 }
 
-/// Like [`load_paths`], but invokes `on_progress(files_done, files_total)` after
-/// each input file is read, so a caller can drive a progress bar.
-pub fn load_paths_with_progress<F>(paths: &[PathBuf], mut on_progress: F) -> Result<ImageStack>
+/// [`load_paths`] with the detector forced.
+pub fn load_paths_as(paths: &[PathBuf], detector: Detector) -> Result<ImageStack> {
+    let mut sel = paths.first().map(|p| Selection::from_path(p)).unwrap_or_default();
+    sel.manual = Some(detector);
+    load_paths_with_progress(paths, sel, |_, _| {})
+}
+
+/// Like [`load_paths`], but with an explicit detector selection, and invokes
+/// `on_progress(files_done, files_total)` after each input file is read, so a
+/// caller can drive a progress bar.
+pub fn load_paths_with_progress<F>(
+    paths: &[PathBuf],
+    detector: Selection,
+    mut on_progress: F,
+) -> Result<ImageStack>
 where
     F: FnMut(usize, usize),
 {
@@ -66,13 +86,14 @@ where
     let mut frames: Vec<Array2<f32>> = Vec::new();
     let mut sources: Vec<PathBuf> = Vec::new();
     let mut dims: Option<(usize, usize)> = None;
-    let mut transposed_on_load = false;
+    // `.npy` input is already display-ready: only TIFF frames are re-oriented.
+    let mut orientation = Orientation::Identity;
 
     for (idx, path) in sorted.iter().enumerate() {
         let loaded = match ext_of(path).as_str() {
             "tif" | "tiff" => {
-                transposed_on_load = true;
-                load_tiff(path)?
+                orientation = detector.orientation();
+                load_tiff(path, orientation)?
             }
             "npy" => load_npy(path)?,
             other => bail!("Unsupported file type '.{other}': {}", path.display()),
@@ -106,7 +127,8 @@ where
         width,
         height,
         sources,
-        transposed_on_load,
+        detector,
+        orientation,
     })
 }
 
@@ -126,7 +148,7 @@ pub fn list_supported_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Read every page of a (possibly multi-page) TIFF file.
-fn load_tiff(path: &Path) -> Result<Vec<Array2<f32>>> {
+fn load_tiff(path: &Path, orientation: Orientation) -> Result<Vec<Array2<f32>>> {
     use tiff::decoder::{Decoder, DecodingResult};
 
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -153,7 +175,7 @@ fn load_tiff(path: &Path) -> Result<Vec<Array2<f32>>> {
             DecodingResult::F64(v) => v.into_iter().map(|x| x as f32).collect(),
         };
 
-        out.push(to_frame(values, w, h)?);
+        out.push(to_frame(values, w, h, orientation)?);
 
         if !decoder.more_images() {
             break;
@@ -221,12 +243,13 @@ fn load_npy(path: &Path) -> Result<Vec<Array2<f32>>> {
 /// Turn a flat, row-major buffer into a frame. If the buffer carries several
 /// samples per pixel (e.g. RGB TIFF) only the first sample is kept.
 ///
-/// TIFF pages are transposed on the way in: the VENUS detectors write them
-/// with rows/columns swapped relative to the sample orientation (same
-/// convention as rust_tiff_viewer and the hype_control COR preview). The
-/// .npy path is NOT transposed — those arrays come from Python callers that
-/// already pass display-ready data.
-fn to_frame(values: Vec<f32>, w: usize, h: usize) -> Result<Array2<f32>> {
+/// TIFF pages are re-oriented on the way in according to the detector: a
+/// Timepix page is transposed (the detector writes rows/columns swapped
+/// relative to the sample orientation, same convention as rust_tiff_viewer),
+/// a CCD page is flipped vertically, QHY (not decided yet) and unknown
+/// detectors are kept as-is. The .npy path is never re-oriented — those
+/// arrays come from Python callers that already pass display-ready data.
+fn to_frame(values: Vec<f32>, w: usize, h: usize, orientation: Orientation) -> Result<Array2<f32>> {
     let expected = w * h;
     let frame = if values.len() == expected {
         Array2::from_shape_vec((h, w), values)?
@@ -242,7 +265,7 @@ fn to_frame(values: Vec<f32>, w: usize, h: usize) -> Result<Array2<f32>> {
             h
         )
     };
-    Ok(frame.reversed_axes().as_standard_layout().into_owned())
+    Ok(orientation.apply(frame))
 }
 
 #[cfg(test)]
@@ -282,5 +305,39 @@ mod tests {
         assert_eq!(stack.n_frames(), 2);
         assert_eq!((stack.height, stack.width), (3, 4));
         assert_eq!(stack.frames[1][(0, 0)], 100.0);
+        assert_eq!(stack.orientation, Orientation::Identity);
+    }
+
+    fn write_tiff_u16(path: &Path, w: usize, h: usize, values: &[u16]) {
+        use tiff::encoder::{colortype::Gray16, TiffEncoder};
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = TiffEncoder::new(std::io::BufWriter::new(file)).unwrap();
+        enc.write_image::<Gray16>(w as u32, h as u32, values).unwrap();
+    }
+
+    #[test]
+    fn tiff_orientation_follows_detector() {
+        let dir = tmp_dir("tiff_orientation");
+        let path = dir.join("img.tif");
+        // 3 wide × 2 tall on disk: [1 2 3; 4 5 6]
+        write_tiff_u16(&path, 3, 2, &[1, 2, 3, 4, 5, 6]);
+
+        // unknown detector (temp folder): as-is
+        let stack = load_paths(&[path.clone()]).unwrap();
+        assert_eq!(stack.orientation, Orientation::Identity);
+        assert_eq!((stack.height, stack.width), (2, 3));
+        assert_eq!(stack.frames[0][(1, 0)], 4.0);
+
+        // Timepix: transposed, 2 wide × 3 tall
+        let stack = load_paths_as(&[path.clone()], Detector::Timepix).unwrap();
+        assert_eq!(stack.orientation, Orientation::Transpose);
+        assert_eq!((stack.height, stack.width), (3, 2));
+        assert_eq!(stack.frames[0][(1, 0)], 2.0);
+
+        // CCD: flipped vertically, same size
+        let stack = load_paths_as(&[path], Detector::Ccd).unwrap();
+        assert_eq!(stack.orientation, Orientation::FlipVertical);
+        assert_eq!((stack.height, stack.width), (2, 3));
+        assert_eq!(stack.frames[0][(0, 0)], 4.0);
     }
 }
