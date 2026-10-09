@@ -47,14 +47,16 @@ OPTIONS:
                           temporary file.
   --single-image          Open on the single-image view (slider through the
                           frames) instead of the integrated image
-  --detector <NAME>       Force the detector the TIFF frames are loaded as,
-                          which decides their orientation: timepix (frames
-                          transposed), ccd (flipped vertically), qhy (as-is,
-                          not decided yet) or as-is. By default the detector
-                          is recognized from the folder layout (images/tpx1,
-                          images/ikonxl, …); the toolbar has a combobox to
-                          change it. Saved masks are always written in the
-                          on-disk orientation of the input files.
+  --detector <NAME>       Force the detector the frames are loaded as, which
+                          decides their orientation: timepix (frames
+                          transposed), ccd (flipped vertically and
+                          horizontally), qhy (rotated 90° counterclockwise)
+                          or as-is. By default TIFF frames follow the detector
+                          recognized from the folder layout (images/tpx1,
+                          images/ikonxl, …) and .npy input is loaded as-is;
+                          the toolbar has a combobox to change it. Saved masks
+                          are always written in the on-disk orientation of
+                          the input files.
   -h, --help              Show this help
 ";
 

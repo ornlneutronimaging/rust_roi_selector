@@ -23,15 +23,14 @@ const COLORBAR_WIDTH: f32 = 78.0;
 
 /// Messages sent from the background loading thread to the UI.
 enum LoadMsg {
-    Progress { done: usize, total: usize },
+    Progress(loader::LoadProgress),
     Done(anyhow::Result<ImageStack>),
 }
 
 /// A loading operation in flight on a background thread.
 struct LoadJob {
     rx: Receiver<LoadMsg>,
-    done: usize,
-    total: usize,
+    progress: loader::LoadProgress,
 }
 
 /// One region of interest in the selection.
@@ -333,8 +332,9 @@ impl RoiApp {
     fn detector_combo(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.label("Detector:").on_hover_text(
             "How the frames are oriented on load: Timepix → transposed, CCD → flipped \
-             vertically, QHY → not decided yet (as-is). 'auto' recognizes the detector from \
-             the folder layout (images/tpx1, images/ikonxl, …).",
+             vertically and horizontally, QHY → rotated 90° counterclockwise. 'auto' \
+             recognizes the detector from the folder layout (images/tpx1, images/ikonxl, …) \
+             for TIFF input and loads .npy input as-is.",
         );
         let auto_text = match self.stack.as_ref() {
             Some(s) if s.detector.is_auto() => format!("auto: {}", s.detector.summary()),
@@ -396,15 +396,21 @@ impl RoiApp {
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let result = loader::load_paths_with_progress(&paths, detector, |done, total| {
-                let _ = progress_tx.send(LoadMsg::Progress { done, total });
+            let result = loader::load_paths_with_progress(&paths, detector, |progress| {
+                let _ = progress_tx.send(LoadMsg::Progress(progress.clone()));
                 ctx.request_repaint();
             });
             let _ = tx.send(LoadMsg::Done(result));
             ctx.request_repaint();
         });
 
-        self.loading = Some(LoadJob { rx, done: 0, total });
+        self.loading = Some(LoadJob {
+            rx,
+            progress: loader::LoadProgress {
+                files_total: total,
+                ..loader::LoadProgress::default()
+            },
+        });
         self.status = format!("Loading {total} file(s)…");
     }
 
@@ -413,9 +419,17 @@ impl RoiApp {
         if let Some(job) = &mut self.loading {
             while let Ok(msg) = job.rx.try_recv() {
                 match msg {
-                    LoadMsg::Progress { done, total } => {
-                        job.done = done;
-                        job.total = total;
+                    LoadMsg::Progress(progress) => {
+                        if self.status.starts_with("Loading ") {
+                            self.status = format!(
+                                "Loading {} image{} from {} file{}…",
+                                progress.frames_total,
+                                if progress.frames_total == 1 { "" } else { "s" },
+                                progress.files_total,
+                                if progress.files_total == 1 { "" } else { "s" },
+                            );
+                        }
+                        job.progress = progress;
                     }
                     LoadMsg::Done(res) => result = Some(res),
                 }
@@ -993,17 +1007,35 @@ impl RoiApp {
 
     fn viewer(&mut self, ui: &mut egui::Ui) {
         if let Some(job) = &self.loading {
-            let frac = if job.total > 0 {
-                job.done as f32 / job.total as f32
+            let p = &job.progress;
+            // A stack handed over by NeCTAR is one big .npy: "0 / 1 files"
+            // says nothing, so name the images and the bytes instead.
+            let text = if p.files_total == 1 {
+                format!(
+                    "⏳ Loading {} image{} from {} — {} of {}",
+                    p.frames_total,
+                    if p.frames_total == 1 { "" } else { "s" },
+                    if p.current.is_empty() { "1 file" } else { p.current.as_str() },
+                    loader::format_bytes(p.bytes_done),
+                    loader::format_bytes(p.bytes_total),
+                )
             } else {
-                0.0
+                format!(
+                    "⏳ Loading {} / {} files ({} image{}) — {} of {}",
+                    p.files_done,
+                    p.files_total,
+                    p.frames_total,
+                    if p.frames_total == 1 { "" } else { "s" },
+                    loader::format_bytes(p.bytes_done),
+                    loader::format_bytes(p.bytes_total),
+                )
             };
             ui.centered_and_justified(|ui| {
                 ui.add_sized(
-                    [320.0, 24.0],
-                    egui::ProgressBar::new(frac)
+                    [420.0, 24.0],
+                    egui::ProgressBar::new(p.fraction())
                         .show_percentage()
-                        .text(format!("⏳ Loading {} / {} files", job.done, job.total)),
+                        .text(text),
                 );
             });
             return;

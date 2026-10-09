@@ -152,7 +152,7 @@ impl Geometry {
 ///
 /// `orientation` must be the `orientation` of the stack the mask was drawn
 /// on: the loader re-oriented the TIFF input for display (Timepix
-/// transposed, CCD flipped vertically), so the mask is put back in the
+/// transposed, CCD flipped vertically and horizontally), so the mask is put back in the
 /// on-disk orientation on save and aligns pixel-for-pixel with the input
 /// files; `.npy` input is loaded as-is (`Identity`), so its masks are saved
 /// as-is.
