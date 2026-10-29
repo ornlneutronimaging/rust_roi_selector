@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod colormap;
+pub mod contrast;
 pub mod integrate;
 pub mod loader;
 pub mod roi;

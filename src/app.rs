@@ -6,6 +6,7 @@
 //! list, applied in order.
 
 use crate::colormap::Colormap;
+use crate::contrast::{self, BarZone};
 use crate::integrate::{integrate, Integration};
 use crate::loader::{self, Detector, ImageStack, Orientation, Selection};
 use crate::roi::{save_mask, Geometry, Tool};
@@ -109,6 +110,10 @@ pub struct RoiApp {
     data_max: f32,
     vmin: f32,
     vmax: f32,
+    /// The auto contrast is the 5–95 % range of the pixel values instead of
+    /// their min / max, so a few outliers do not flatten the colorscale.
+    /// Display only: the values outside are drawn saturated.
+    auto_percentiles: bool,
     colormap: Colormap,
 
     // Textures.
@@ -216,6 +221,7 @@ impl RoiApp {
             data_max: 1.0,
             vmin: 0.0,
             vmax: 1.0,
+            auto_percentiles: false,
             colormap: Colormap::Viridis,
             img_tex: None,
             mask_tex: None,
@@ -484,23 +490,40 @@ impl RoiApp {
             stack.frames[self.frame_idx].clone()
         };
 
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &v in img.iter() {
-            if v.is_finite() {
-                lo = lo.min(v);
-                hi = hi.max(v);
-            }
-        }
-        if !lo.is_finite() || !hi.is_finite() {
-            lo = 0.0;
-            hi = 1.0;
-        }
+        let (lo, hi) = contrast::data_range(&img);
         self.data_min = lo;
         self.data_max = hi;
+        self.integrated = Some(img);
+        self.auto_contrast();
+    }
+
+    /// The automatic display range of the image on screen: its min / max,
+    /// or its 5–95 % range when the outliers are left out.
+    fn auto_range(&self) -> (f32, f32) {
+        match &self.integrated {
+            Some(img) if self.auto_percentiles => {
+                contrast::percentile_range(img, contrast::AUTO_PERCENTILES.0, contrast::AUTO_PERCENTILES.1)
+            }
+            _ => (self.data_min, self.data_max),
+        }
+    }
+
+    /// Set the display range to the auto range (the Auto button, a
+    /// double-click on the colorbar, a new image).
+    fn auto_contrast(&mut self) {
+        let (lo, hi) = self.auto_range();
         self.vmin = lo;
         self.vmax = hi;
-        self.integrated = Some(img);
         self.img_dirty = true;
+    }
+
+    /// Set the display range as edited on the colorbar.
+    fn set_contrast(&mut self, lo: f32, hi: f32) {
+        if lo < hi && (lo, hi) != (self.vmin, self.vmax) {
+            self.vmin = lo;
+            self.vmax = hi;
+            self.img_dirty = true;
+        }
     }
 
     // ----- ROI model ----------------------------------------------------------
@@ -789,20 +812,62 @@ impl RoiApp {
 
             ui.label("Contrast:");
             let range = self.data_min..=self.data_max;
-            let speed = (self.data_max - self.data_min).max(1.0) / 200.0;
-            let r1 = ui.add(
-                egui::DragValue::new(&mut self.vmin)
-                    .speed(speed)
-                    .range(range.clone()),
-            );
-            let r2 = ui.add(egui::DragValue::new(&mut self.vmax).speed(speed).range(range));
-            if ui.button("Auto").clicked() {
-                self.vmin = self.data_min;
-                self.vmax = self.data_max;
+            // A drag of 200 pixels crosses the current span, whatever the
+            // magnitude of the values (counts or transmission).
+            let span = (self.vmax - self.vmin).abs();
+            let speed = if span > 0.0 { span } else { (self.data_max - self.data_min).max(1.0) } / 200.0;
+            let field_hint = "Slide to move this end of the colorscale, or click to type a value — the colorbar can be dragged too";
+            let r1 = ui
+                .add(egui::DragValue::new(&mut self.vmin).speed(speed).range(range.clone()))
+                .on_hover_text(field_hint);
+            let r2 = ui
+                .add(egui::DragValue::new(&mut self.vmax).speed(speed).range(range))
+                .on_hover_text(field_hint);
+            if r1.changed() || r2.changed() {
+                // Keep the ends ordered: the one being slid stops just short
+                // of the other.
+                let min_span = (self.data_max - self.data_min).abs() * 1e-4;
+                if r1.changed() && self.vmin > self.vmax - min_span {
+                    self.vmin = self.vmax - min_span;
+                }
+                if r2.changed() && self.vmax < self.vmin + min_span {
+                    self.vmax = self.vmin + min_span;
+                }
                 self.img_dirty = true;
             }
-            if r1.changed() || r2.changed() {
-                self.img_dirty = true;
+            let auto_hint = if self.auto_percentiles {
+                "Reset to the 5–95 % range of the pixel values"
+            } else {
+                "Reset to the min / max of the pixel values"
+            };
+            if ui.button("Auto").on_hover_text(auto_hint).clicked() {
+                self.auto_contrast();
+            }
+            let warn = ui.visuals().warn_fg_color;
+            let pct_label = if self.auto_percentiles {
+                egui::RichText::new("5–95 %").color(warn)
+            } else {
+                egui::RichText::new("5–95 %")
+            };
+            if ui
+                .selectable_label(self.auto_percentiles, pct_label)
+                .on_hover_text(
+                    "Auto range from the 5th to the 95th percentile of the pixel values instead of their min / max, \
+                     so a few outliers (hot pixels, dead pixels) no longer flatten the colorscale. \
+                     Display only: the 5 % lowest and 5 % highest values are drawn saturated at the ends of the \
+                     colorscale; the data, the ROIs and the mask are not affected.",
+                )
+                .clicked()
+            {
+                self.auto_percentiles = !self.auto_percentiles;
+                self.auto_contrast();
+            }
+            if self.auto_percentiles {
+                ui.add(
+                    egui::Label::new(egui::RichText::new("⚠ display only").small().color(warn))
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                )
+                .on_hover_text("The 5 % lowest and the 5 % highest pixel values are drawn saturated with the end colors of the colorscale; their values, the ROIs and the mask are unchanged");
             }
 
             ui.separator();
@@ -1129,11 +1194,14 @@ impl RoiApp {
     }
 
     /// Vertical colorbar: the colormap gradient with tick labels running from
-    /// `vmin` (bottom) to `vmax` (top). Reflects the live contrast settings.
-    fn colorbar(&self, ui: &mut egui::Ui, height: f32) {
+    /// `vmin` (bottom) to `vmax` (top). Reflects the live contrast settings,
+    /// and edits them: drag its top end to move the maximum, its bottom end
+    /// the minimum, its middle to shift both; wheel to widen or narrow;
+    /// double-click for Auto.
+    fn colorbar(&mut self, ui: &mut egui::Ui, height: f32) {
         let Some(tex) = &self.cbar_tex else { return };
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(COLORBAR_WIDTH, height), Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(COLORBAR_WIDTH, height), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let font = egui::TextStyle::Small.resolve(ui.style());
         let text_color = ui.visuals().text_color();
@@ -1173,6 +1241,73 @@ impl RoiApp {
                 font.clone(),
                 text_color,
             );
+        }
+        // Grips at the ends say the bar can be dragged.
+        let grip = Stroke::new(1.5, text_color);
+        for y in [bar.top() + 3.0, bar.bottom() - 3.0] {
+            painter.line_segment(
+                [Pos2::new(bar.left() + 3.0, y), Pos2::new(bar.right() - 3.0, y)],
+                grip,
+            );
+        }
+
+        // ----- range edits -----
+        let (lo, hi) = (self.vmin as f64, self.vmax as f64);
+        let data = (self.data_min as f64, self.data_max as f64);
+        let id = response.id;
+        let frac_of = |p: Pos2| ((p.y - bar.top()) / bar.height()).clamp(0.0, 1.0);
+        if response.drag_started() {
+            if let Some(p) = response.interact_pointer_pos() {
+                ui.data_mut(|d| d.insert_temp(id, contrast::bar_zone(frac_of(p))));
+            }
+        }
+        let dragging = ui.data(|d| d.get_temp::<BarZone>(id));
+        if response.dragged() {
+            if let Some(zone) = dragging {
+                let dy = (response.drag_delta().y / bar.height()) as f64;
+                let (nlo, nhi) = contrast::colorbar_drag(lo, hi, zone, dy, data);
+                self.set_contrast(nlo as f32, nhi as f32);
+                ui.ctx().set_cursor_icon(match zone {
+                    BarZone::Middle => egui::CursorIcon::Grabbing,
+                    _ => egui::CursorIcon::ResizeVertical,
+                });
+            }
+        }
+        if response.drag_stopped() {
+            ui.data_mut(|d| d.remove::<BarZone>(id));
+        }
+        if response.double_clicked() {
+            self.auto_contrast();
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                let factor = (-(scroll as f64) * 0.005).exp();
+                let (nlo, nhi) = contrast::colorbar_scale(lo, hi, factor, data);
+                self.set_contrast(nlo as f32, nhi as f32);
+                // Eat the scroll so the viewer does not zoom or scroll.
+                ui.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+            }
+            if dragging.is_none() {
+                if let Some(p) = response.hover_pos() {
+                    let frac = frac_of(p);
+                    ui.ctx().set_cursor_icon(match contrast::bar_zone(frac) {
+                        BarZone::Middle => egui::CursorIcon::Grab,
+                        _ => egui::CursorIcon::ResizeVertical,
+                    });
+                    let v = self.vmax + (self.vmin - self.vmax) * frac;
+                    let auto = if self.auto_percentiles {
+                        "\nAuto = the 5–95 % range of the values (display only: the pixels outside are saturated)"
+                    } else {
+                        ""
+                    };
+                    response.on_hover_text(format!(
+                        "{}\nDrag the top end to set the maximum, the bottom end the minimum, \
+                         the middle to shift both; wheel to widen or narrow; double-click for Auto{auto}",
+                        fmt_tick(v)
+                    ));
+                }
+            }
         }
     }
 

@@ -66,7 +66,9 @@ roi_selector integrated_sample.npy --output mask.tif --called-from-python \
 | Edit exact pixel values | Select the region and edit the fields in the right panel |
 | Carve a hole | Check **Subtract**, then draw over an existing region |
 | Delete | Select, then `Delete`/`Backspace`, or the Delete button in the panel |
-| Contrast / colormap / zoom | Toolbar |
+| Contrast | Slide the Min / Max fields of the toolbar (or click one to type), or drag the colorbar: its top end sets the maximum, its bottom end the minimum, its middle shifts both; the wheel over it widens or narrows the range; double-click restores Auto |
+| Leave the outliers out | **5–95 %** in the toolbar: Auto then spans the 5th to the 95th percentile of the pixel values, so hot or dead pixels no longer flatten the colorscale — display only, the 5 % of pixels at each end are drawn saturated (the toolbar says so in orange); the data and the mask are unchanged |
+| Colormap / zoom | Toolbar |
 
 The status bar shows the live count of selected pixels and the pixel value
 under the cursor.
