@@ -1,4 +1,4 @@
-# ROI Selector
+# Image ROI Selector
 
 Native GUI (Rust, [egui](https://github.com/emilk/egui)) to select regions of
 interest on a neutron-imaging data set and export them as a **mask file**:
@@ -98,6 +98,15 @@ with tempfile.TemporaryDirectory() as tmp:
 The window opens on the machine running Python, so this requires a working
 display (e.g. a ThinLinc session); it will not appear on a remote browser
 viewing a headless notebook server.
+
+## Log
+
+Every session appends to `/SNS/VENUS/shared/log/roi_selector_<user>.log`
+(same directory, naming and line format as the other VENUS tools, so the
+**log browser** shows it): the command line, the files loaded (count, size,
+detector and orientation), every ROI drawn, deleted or toggled, the buttons
+pressed, each mask saved (path, pixel count) and every error shown in the
+status bar.
 
 ## Tests
 

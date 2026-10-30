@@ -9,6 +9,7 @@
 use ndarray::Array2;
 use roi_selector::app::RoiApp;
 use roi_selector::loader;
+use roi_selector::logger;
 use std::path::PathBuf;
 
 const USAGE: &str = "\
@@ -99,6 +100,7 @@ fn parse_args() -> Result<ParsedArgs, String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
+                logger::log("--help requested, exiting");
                 println!("{USAGE}");
                 std::process::exit(0);
             }
@@ -124,7 +126,9 @@ fn parse_args() -> Result<ParsedArgs, String> {
             }
             "--mask" => {
                 let path = args.next().ok_or("--mask requires a path")?;
-                initial_mask = Some(load_initial_mask(&PathBuf::from(path))?);
+                let mask = load_initial_mask(&PathBuf::from(&path))?;
+                logger::log(format!("Initial mask {path}: {}×{} px, {} selected", mask.ncols(), mask.nrows(), mask.iter().filter(|&&b| b).count()));
+                initial_mask = Some(mask);
             }
             s if s.starts_with('-') => return Err(format!("Unknown option: {s}")),
             _ => inputs.push(PathBuf::from(a)),
@@ -151,6 +155,28 @@ fn parse_args() -> Result<ParsedArgs, String> {
 }
 
 fn main() -> eframe::Result<()> {
+    // Shared VENUS log (roi_selector_<user>.log), so what a user did and
+    // where it failed can be read back in the log browser.
+    if let Err(e) = logger::init() {
+        eprintln!("Warning: logging disabled — {e}");
+    }
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    logger::log(format!(
+        "Command line: roi_selector {}",
+        if argv.is_empty() { "(no arguments)".to_owned() } else { argv.join(" ") }
+    ));
+    if let Ok(cwd) = std::env::current_dir() {
+        logger::log(format!("Working directory: {}", cwd.display()));
+    }
+    // A crash (panic) is the error users report most often without being
+    // able to say what happened: record it before the default hook prints
+    // it to the terminal nobody is looking at.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        logger::error(format!("PANIC: {info}"));
+        default_hook(info);
+    }));
+
     let (
         inputs,
         output,
@@ -163,6 +189,7 @@ fn main() -> eframe::Result<()> {
     ) = match parse_args() {
         Ok(parsed) => parsed,
         Err(e) => {
+            logger::error(format!("Invalid command line: {e}"));
             eprintln!("Error: {e}\n\n{USAGE}");
             std::process::exit(2);
         }
@@ -176,6 +203,7 @@ fn main() -> eframe::Result<()> {
             match loader::list_supported_in_dir(&input) {
                 Ok(found) => files.extend(found),
                 Err(e) => {
+                    logger::error(format!("Input folder {}: {e:#}", input.display()));
                     eprintln!("Error: {e:#}");
                     std::process::exit(1);
                 }
@@ -188,12 +216,12 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
-            .with_title("VENUS ROI Selector"),
+            .with_title("Image ROI Selector"),
         ..Default::default()
     };
 
-    eframe::run_native(
-        "VENUS ROI Selector",
+    let result = eframe::run_native(
+        "Image ROI Selector",
         native_options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
@@ -215,7 +243,12 @@ fn main() -> eframe::Result<()> {
             }
             Ok(Box::new(app))
         }),
-    )
+    );
+    match &result {
+        Ok(()) => logger::log("Application closed"),
+        Err(e) => logger::error(format!("Application failed: {e}")),
+    }
+    result
 }
 
 /// egui's proportional family (Ubuntu-Light + the emoji fonts) has no glyph

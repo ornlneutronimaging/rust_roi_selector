@@ -8,6 +8,7 @@ pub mod colormap;
 pub mod contrast;
 pub mod integrate;
 pub mod loader;
+pub mod logger;
 pub mod roi;
 pub mod theme;
 pub mod zoom;

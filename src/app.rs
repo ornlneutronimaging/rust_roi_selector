@@ -8,6 +8,7 @@
 use crate::colormap::Colormap;
 use crate::contrast::{self, BarZone};
 use crate::integrate::{integrate, Integration};
+use crate::logger;
 use crate::loader::{self, Detector, ImageStack, Orientation, Selection};
 use crate::roi::{save_mask, Geometry, Tool};
 
@@ -251,6 +252,18 @@ impl RoiApp {
         }
     }
 
+    /// Show `msg` in the status bar and record it in the log.
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        logger::log(&self.status);
+    }
+
+    /// Show `msg` in the status bar and record it as an error.
+    fn set_error(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        logger::error(&self.status);
+    }
+
     // ----- instructions modal ----------------------------------------------
 
     /// Modal shown on top of the application when the caller passed
@@ -379,8 +392,14 @@ impl RoiApp {
             ui.label(egui::RichText::new(s.orientation.label()).weak())
                 .on_hover_text(s.detector.detector().description());
         }
-        if changed && !self.loaded_paths.is_empty() {
-            self.start_load(self.loaded_paths.clone(), ctx);
+        if changed {
+            logger::log(format!(
+                "Detector set to {}",
+                self.detector_override.map_or("auto", |d| d.label())
+            ));
+            if !self.loaded_paths.is_empty() {
+                self.start_load(self.loaded_paths.clone(), ctx);
+            }
         }
     }
 
@@ -397,6 +416,12 @@ impl RoiApp {
         self.loaded_paths = paths.clone();
         let detector = self.detector_for(&paths[0]);
         let total = paths.len();
+        logger::log(format!(
+            "Loading {total} file(s) as {} from {}{}",
+            detector.summary(),
+            paths[0].display(),
+            if total > 1 { format!(" … {}", paths[total - 1].display()) } else { String::new() }
+        ));
         let (tx, rx) = std::sync::mpsc::channel();
         let progress_tx = tx.clone();
         let ctx = ctx.clone();
@@ -445,7 +470,7 @@ impl RoiApp {
             self.loading = None;
             match res {
                 Ok(stack) => self.apply_stack(stack),
-                Err(e) => self.status = format!("Load failed: {e:#}"),
+                Err(e) => self.set_error(format!("Load failed: {e:#}")),
             }
         }
     }
@@ -476,9 +501,9 @@ impl RoiApp {
             .as_ref()
             .map(|s| (s.detector.summary(), s.orientation))
             .unwrap_or_default();
-        self.status = format!(
+        self.set_status(format!(
             "Loaded {n} frame(s), {w}×{h} px, {detector}: {orientation} (from {first} …)."
-        );
+        ));
     }
 
     fn recompute_integration(&mut self) {
@@ -537,6 +562,7 @@ impl RoiApp {
 
     fn undo(&mut self) {
         let Some(prev) = self.undo.pop() else { return };
+        logger::log(format!("Undo: {} → {} ROI(s)", self.rois.len(), prev.len()));
         self.rois = prev;
         if let Some(sid) = self.selected {
             if !self.rois.iter().any(|r| r.id == sid) {
@@ -551,6 +577,7 @@ impl RoiApp {
             return;
         }
         self.push_undo();
+        logger::log(format!("Clear: {} ROI(s) removed", self.rois.len()));
         self.rois.clear();
         self.selected = None;
         self.mask_tex_dirty = true;
@@ -598,6 +625,7 @@ impl RoiApp {
     fn delete_selected(&mut self) {
         if let Some(sid) = self.selected {
             self.push_undo();
+            logger::log(format!("Deleted ROI #{sid}"));
             self.rois.retain(|r| r.id != sid);
             self.selected = None;
             self.mask_tex_dirty = true;
@@ -674,24 +702,32 @@ impl RoiApp {
     // ----- file dialogs -----------------------------------------------------
 
     fn open_files_dialog(&mut self, ctx: &egui::Context) {
-        if let Some(files) = rfd::FileDialog::new()
+        match rfd::FileDialog::new()
             .add_filter("Images", loader::SUPPORTED_EXTENSIONS)
             .set_title("Open TIFF / .npy image(s)")
             .pick_files()
         {
-            self.start_load(files, ctx);
+            Some(files) => {
+                logger::log(format!("Open Files: {} file(s) picked", files.len()));
+                self.start_load(files, ctx);
+            }
+            None => logger::log("Open Files: dialog cancelled"),
         }
     }
 
     fn open_folder_dialog(&mut self, ctx: &egui::Context) {
-        if let Some(dir) = rfd::FileDialog::new()
+        match rfd::FileDialog::new()
             .set_title("Open a folder of TIFF / .npy images")
             .pick_folder()
         {
-            match loader::list_supported_in_dir(&dir) {
-                Ok(files) => self.start_load(files, ctx),
-                Err(e) => self.status = format!("{e:#}"),
+            Some(dir) => {
+                logger::log(format!("Open Folder: {}", dir.display()));
+                match loader::list_supported_in_dir(&dir) {
+                    Ok(files) => self.start_load(files, ctx),
+                    Err(e) => self.set_error(format!("{e:#}")),
+                }
             }
+            None => logger::log("Open Folder: dialog cancelled"),
         }
     }
 
@@ -703,14 +739,18 @@ impl RoiApp {
         // the orientation the loader applied (TIFF input; `.npy` is as-is).
         match save_mask(path, &mask, self.orientation()) {
             Ok(()) => {
-                self.status = format!(
-                    "Saved mask ({count} px = 1) to {}",
+                logger::log(format!(
+                    "Saved mask ({count} px = 1, {} ROI(s){}, written back as {}) to {}",
+                    self.rois.len(),
+                    if self.initial_mask.is_some() { " + initial mask" } else { "" },
+                    self.orientation().label(),
                     path.display()
-                );
+                ));
+                self.status = format!("Saved mask ({count} px = 1) to {}", path.display());
                 true
             }
             Err(e) => {
-                self.status = format!("Save failed: {e:#}");
+                self.set_error(format!("Save failed ({}): {e:#}", path.display()));
                 false
             }
         }
@@ -718,11 +758,11 @@ impl RoiApp {
 
     fn save_mask_dialog(&mut self) {
         if self.integrated.is_none() {
-            self.status = "Nothing to save — load an image first.".to_owned();
+            self.set_status("Nothing to save — load an image first.");
             return;
         }
         if self.selected_count == 0 {
-            self.status = "Nothing to save — draw at least one region first.".to_owned();
+            self.set_status("Nothing to save — draw at least one region first.");
             return;
         }
         let default_name = self
@@ -742,8 +782,11 @@ impl RoiApp {
         if let Some(dir) = self.save_dir.as_ref().or(self.data_dir.as_ref()) {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(path) = dialog.save_file() {
-            self.write_mask(&path);
+        match dialog.save_file() {
+            Some(path) => {
+                self.write_mask(&path);
+            }
+            None => logger::log("Save mask as: dialog cancelled"),
         }
     }
 
@@ -757,12 +800,14 @@ impl RoiApp {
                 .add_enabled(!busy, egui::Button::new("📂 Open Files…"))
                 .clicked()
             {
+                logger::log("▶ Open Files clicked");
                 self.open_files_dialog(&ctx);
             }
             if ui
                 .add_enabled(!busy, egui::Button::new("📁 Open Folder…"))
                 .clicked()
             {
+                logger::log("▶ Open Folder clicked");
                 self.open_folder_dialog(&ctx);
             }
 
@@ -773,22 +818,34 @@ impl RoiApp {
             let n_frames = self.stack.as_ref().map(|s| s.n_frames()).unwrap_or(0);
             let mut changed = false;
             ui.add_enabled_ui(n_frames > 1, |ui| {
-                changed |= ui
+                let view_changed = ui
                     .selectable_value(&mut self.show_integrated, true, "Integrated")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut self.show_integrated, false, "Single image")
-                    .changed();
+                    .changed()
+                    | ui
+                        .selectable_value(&mut self.show_integrated, false, "Single image")
+                        .changed();
+                if view_changed {
+                    logger::log(format!(
+                        "View: {}",
+                        if self.show_integrated { "integrated image" } else { "single image" }
+                    ));
+                }
+                changed |= view_changed;
                 if self.show_integrated {
+                    let mut method_changed = false;
                     egui::ComboBox::from_id_salt("integration")
                         .selected_text(format!("Integrate: {}", self.integration.label()))
                         .show_ui(ui, |ui| {
                             for m in Integration::ALL {
-                                changed |= ui
+                                method_changed |= ui
                                     .selectable_value(&mut self.integration, m, m.label())
                                     .changed();
                             }
                         });
+                    if method_changed {
+                        logger::log(format!("Integration: {}", self.integration.label()));
+                    }
+                    changed |= method_changed;
                 } else {
                     let max = n_frames.saturating_sub(1);
                     let source = self
@@ -905,7 +962,7 @@ impl RoiApp {
                 {
                     self.initial_mask = None;
                     self.mask_tex_dirty = true;
-                    self.status = "Initial mask dropped.".to_owned();
+                    self.set_status("Initial mask dropped.");
                 }
             }
 
@@ -917,20 +974,29 @@ impl RoiApp {
         ui.horizontal_wrapped(|ui| {
             ui.label("Tool:");
             for t in [Tool::Rectangle, Tool::Ellipse, Tool::Circle] {
-                ui.selectable_value(&mut self.tool, t, t.label());
+                if ui.selectable_value(&mut self.tool, t, t.label()).changed() {
+                    logger::log(format!("Tool: {}", t.label()));
+                }
             }
             ui.separator();
-            ui.checkbox(&mut self.subtract, "Subtract")
-                .on_hover_text("New regions carve out of the selection instead of adding");
+            if ui
+                .checkbox(&mut self.subtract, "Subtract")
+                .on_hover_text("New regions carve out of the selection instead of adding")
+                .changed()
+            {
+                logger::log(format!("Subtract mode: {}", self.subtract));
+            }
 
             ui.separator();
             if ui
                 .add_enabled(!self.undo.is_empty(), egui::Button::new("↩ Undo"))
                 .clicked()
             {
+                logger::log("▶ Undo clicked");
                 self.undo();
             }
             if ui.button("🗑 Clear").clicked() {
+                logger::log("▶ Clear clicked");
                 self.clear_rois();
             }
 
@@ -977,9 +1043,12 @@ impl RoiApp {
                         .add_enabled(can_save, egui::Button::new(label))
                         .on_hover_text(hover)
                         .clicked()
-                        && self.write_mask(&out)
                     {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        logger::log(format!("▶ {label} clicked"));
+                        if self.write_mask(&out) {
+                            logger::log("Mask written; closing the window to return to the caller");
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
                     }
                 }
                 if ui
@@ -987,6 +1056,7 @@ impl RoiApp {
                     .on_hover_text("Write the 1/0 mask to a .tif or .npy file of your choice")
                     .clicked()
                 {
+                    logger::log("▶ Save mask as clicked");
                     self.save_mask_dialog();
                 }
                 ui.separator();
@@ -1040,6 +1110,7 @@ impl RoiApp {
                             .clicked()
                         {
                             roi.additive = !roi.additive;
+                            logger::log(format!("ROI #{id} set to {}", if roi.additive { "add" } else { "subtract" }));
                             changed = true;
                         }
                         if ui.small_button("Delete").clicked() {
@@ -1059,6 +1130,7 @@ impl RoiApp {
         self.selected = new_selected;
         if let Some(rid) = to_remove {
             self.push_undo();
+            logger::log(format!("Deleted ROI #{rid}"));
             self.rois.retain(|r| r.id != rid);
             if self.selected == Some(rid) {
                 self.selected = None;
@@ -1446,6 +1518,14 @@ impl RoiApp {
                             self.selected = None;
                             self.undo.pop(); // discard the snapshot for the no-op
                         }
+                    } else if let Some(roi) = self.selected.and_then(|sid| self.rois.iter().find(|r| r.id == sid)) {
+                        logger::log(format!(
+                            "Drew {} ROI #{} ({}): {}",
+                            roi.kind().to_ascii_lowercase(),
+                            roi.id,
+                            if roi.additive { "add" } else { "subtract" },
+                            geom_summary(&roi.geom)
+                        ));
                     }
                 }
             }
@@ -1489,6 +1569,15 @@ impl RoiApp {
             let sel = self.selected == Some(roi.id);
             draw_roi(painter, &roi.geom, roi.additive, sel, &to_screen, scale);
         }
+    }
+}
+
+/// One-line description of a geometry (image pixels) for the log.
+fn geom_summary(geom: &Geometry) -> String {
+    match *geom {
+        Geometry::Rect { x0, y0, x1, y1 } => format!("x {x0:.1}–{x1:.1}, y {y0:.1}–{y1:.1}"),
+        Geometry::Ellipse { cx, cy, rx, ry } => format!("center ({cx:.1}, {cy:.1}), rx {rx:.1}, ry {ry:.1}"),
+        Geometry::Circle { cx, cy, r } => format!("center ({cx:.1}, {cy:.1}), r {r:.1}"),
     }
 }
 
